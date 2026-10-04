@@ -1,0 +1,90 @@
+{
+  "target_urls": {
+    "description": "目标网页地址（按顺序尝试，前一个失败自动切换下一个）",
+    "type": "list",
+    "default": [
+      "https://dcstream.top/whosin",
+      "http://47.116.47.191/whosin"
+    ],
+    "hint": "格式示例：[\"https://dcstream.top/whosin\", \"http://47.116.47.191/whosin\"]"
+  },
+  "timeout_seconds": {
+    "description": "爬取超时时间（秒）",
+    "type": "int",
+    "default": 10
+  },
+  "cookie": {
+    "description": "站点 Cookie（当目标页面要求登录时填写）",
+    "type": "string",
+    "default": "",
+    "secret": true,
+    "hint": "若 /whosin 被重定向到登录页，可填写浏览器请求头中的完整 Cookie；优先于账号密码方式"
+  },
+  "login_username": {
+    "description": "站点账号（自动登录用，解决 /whosin 需要登录的问题）",
+    "type": "string",
+    "default": "",
+    "hint": "填写后插件会自动登录站点获取会话，无需手动维护 Cookie"
+  },
+  "login_password": {
+    "description": "站点密码（自动登录用）",
+    "type": "string",
+    "default": "",
+    "secret": true
+  },
+  "enable_image": {
+    "description": "是否随文本一起发送渲染图片",
+    "type": "bool",
+    "default": true
+  },
+  "cache_ttl_seconds": {
+    "description": "图片缓存时间（秒，0 表示不缓存）",
+    "type": "int",
+    "default": 30
+  },
+  "image_theme": {
+    "description": "图片模板主题",
+    "type": "string",
+    "options": [
+      "cyberpunk-bw"
+    ],
+    "default": "cyberpunk-bw"
+  },
+  "cooldown_seconds": {
+    "description": "同一用户在同一群的指令冷却（秒，0 表示不限制）",
+    "type": "int",
+    "default": 60
+  },
+  "group_interval_seconds": {
+    "description": "同一群内两次回复的最小间隔（秒，0 表示不限制）",
+    "type": "int",
+    "default": 5
+  },
+  "allowed_groups": {
+    "description": "只响应的群号白名单（留空 = 不限制）",
+    "type": "list",
+    "default": [],
+    "hint": "格式示例：[\"123456789\"]；填上你的群号可把机器人锁死在该群"
+  },
+  "allow_private_chat": {
+    "description": "是否响应私聊指令",
+    "type": "bool",
+    "default": false
+  },
+  "status_push_enable": {
+    "description": "定期状态推送（按间隔向目标会话发送机器人状态）",
+    "type": "bool",
+    "default": false
+  },
+  "status_push_interval_seconds": {
+    "description": "状态推送间隔（秒，默认 600 = 10 分钟）",
+    "type": "int",
+    "default": 600
+  },
+  "status_push_targets": {
+    "description": "状态推送目标会话列表（格式：平台ID:FriendMessage:用户openid）",
+    "type": "list",
+    "default": [],
+    "hint": "示例：[\"default_1905699951:FriendMessage:xxxxxxxx\"]；主号先给机器人发一条消息，再把会话地址填进来"
+  }
+}

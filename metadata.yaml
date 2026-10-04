@@ -1,0 +1,9 @@
+name: astrbot_plugin_dcs_whosin
+display_name: 直流会馆查询机器人
+desc: 查询直流会馆店内实时在店人员（玩家 / 管理员 / 士大夫），以黑白赛博朋克风图片 + 文本返回；附带 25h 娱乐指令。
+short_desc: 直流会馆在店查询（/j）+ /25h
+version: v1.0.0
+author: 直流会馆
+support_platforms:
+  - aiocqhttp
+astrbot_version: ">=4.13"

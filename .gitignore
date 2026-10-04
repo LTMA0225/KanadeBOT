@@ -1,0 +1,11 @@
+# ---- 大文件：不入库（GitHub 单文件 100MB 限制 / 传输速度）----
+NapCat/
+deploy/installers/
+deploy/runtime/
+
+# ---- 运行时产物 ----
+__pycache__/
+*.pyc
+*.pyo
+deploy/watchdog.log
+NapCat_backup_20260929/

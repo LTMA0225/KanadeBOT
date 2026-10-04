@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; }
+  body {
+    background: #08080b;
+    font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", "Source Han Sans SC", "WenQuanYi Micro Hei", "Consolas", "Courier New", monospace;
+    color: #f5f5f5;
+  }
+
+  /* 全画布框架：铺满整张图（渲染视口 1280×720；内容超出时整页自动增高） */
+  .frame {
+    position: relative;
+    width: 100%;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding: 26px 34px 20px;
+    background-color: #0a0a0e;
+    background-image:
+      repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.05) 0px, rgba(255, 255, 255, 0.05) 1px, transparent 1px, transparent 42px),
+      repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.05) 0px, rgba(255, 255, 255, 0.05) 1px, transparent 1px, transparent 42px),
+      radial-gradient(ellipse at 50% -20%, rgba(255, 255, 255, 0.08), transparent 60%);
+    border: 1px solid rgba(255, 255, 255, 0.4);
+    overflow: hidden;
+  }
+
+  .frame::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.25) 0px, rgba(0, 0, 0, 0.25) 1px, transparent 1px, transparent 4px);
+    opacity: 0.35;
+  }
+
+  .corner { position: absolute; width: 28px; height: 28px; border-color: #ffffff; border-style: solid; }
+  .corner.tl { top: 10px; left: 10px; border-width: 2px 0 0 2px; }
+  .corner.tr { top: 10px; right: 10px; border-width: 2px 2px 0 0; }
+  .corner.bl { bottom: 10px; left: 10px; border-width: 0 0 2px 2px; }
+  .corner.br { bottom: 10px; right: 10px; border-width: 0 2px 2px 0; }
+
+  header { display: flex; align-items: center; gap: 20px; padding-bottom: 4px; }
+
+  .logo-card {
+    background: #f2f2f2;
+    padding: 8px 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .logo-card img { height: 54px; display: block; }
+
+  .title { flex: 1; min-width: 0; }
+  .title h1 {
+    font-size: 38px;
+    letter-spacing: 0.18em;
+    font-weight: 800;
+    color: #ffffff;
+    text-shadow: 0 0 16px rgba(255, 255, 255, 0.35);
+    white-space: nowrap;
+  }
+  .title p {
+    margin-top: 4px;
+    font-size: 13px;
+    letter-spacing: 0.3em;
+    color: rgba(255, 255, 255, 0.55);
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+
+  .clockbox { text-align: right; }
+  .clockbox .clock {
+    font-family: "Consolas", "Courier New", monospace;
+    font-size: 30px;
+    font-weight: 700;
+    color: #ffffff;
+    letter-spacing: 0.06em;
+  }
+  .clockbox .weekday {
+    margin-top: 2px;
+    font-size: 14px;
+    letter-spacing: 0.3em;
+    color: rgba(255, 255, 255, 0.55);
+  }
+
+  .divider {
+    height: 2px;
+    background: repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.85) 0px, rgba(255, 255, 255, 0.85) 16px, transparent 16px, transparent 26px);
+    opacity: 0.55;
+  }
+
+  .block {
+    position: relative;
+    padding: 14px 16px 16px;
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    background: rgba(255, 255, 255, 0.035);
+    display: flex;
+    flex-direction: column;
+  }
+  .block.players { flex: 1 1 auto; justify-content: center; }
+  .block.staff { flex: 0 0 auto; }
+
+  .block-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 12px; }
+  .tag {
+    font-family: "Consolas", "Courier New", monospace;
+    font-size: 12px;
+    letter-spacing: 0.28em;
+    padding: 3px 10px;
+    border: 1px solid rgba(255, 255, 255, 0.6);
+    color: #ffffff;
+    background: rgba(255, 255, 255, 0.08);
+  }
+  .block-title { font-size: 22px; font-weight: 800; letter-spacing: 0.12em; }
+  .count {
+    margin-left: auto;
+    font-family: "Consolas", "Courier New", monospace;
+    font-size: 22px;
+    font-weight: 700;
+    color: rgba(255, 255, 255, 0.9);
+  }
+
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+    gap: 10px;
+    align-content: start;
+  }
+
+  .pcard {
+    border: 1px solid rgba(255, 255, 255, 0.4);
+    background: rgba(255, 255, 255, 0.06);
+    padding: 8px 12px 9px;
+    min-width: 0;
+  }
+  .pname {
+    font-size: 20px;
+    font-weight: 700;
+    line-height: 1.3;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .pmeta {
+    margin-top: 3px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: rgba(255, 255, 255, 0.55);
+    font-family: "Consolas", "Courier New", monospace;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .pmeta .k { color: rgba(255, 255, 255, 0.38); }
+  .pdur {
+    margin-top: 1px;
+    font-size: 13px;
+    line-height: 1.4;
+    font-family: "Consolas", "Courier New", monospace;
+    color: rgba(255, 255, 255, 0.88);
+  }
+
+  footer {
+    margin-top: auto;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 13px;
+    letter-spacing: 0.2em;
+    color: rgba(255, 255, 255, 0.45);
+    font-family: "Consolas", "Courier New", monospace;
+  }
+</style>
+</head>
+<body>
+  <div class="frame">
+    <span class="corner tl"></span>
+    <span class="corner tr"></span>
+    <span class="corner bl"></span>
+    <span class="corner br"></span>
+
+    <header>
+      {% if logo_uri %}<div class="logo-card"><img src="{{ logo_uri }}" alt="直流会馆"></div>{% endif %}
+      <div class="title">
+        <h1>直流会馆</h1>
+        <p>DCSTREAM HALL / 在店一览</p>
+      </div>
+      <div class="clockbox">
+        <div class="clock">{{ time_text }}</div>
+        <div class="weekday">{{ weekday_text }}</div>
+      </div>
+    </header>
+
+    <div class="divider"></div>
+
+    <section class="block players">
+      <div class="block-head">
+        <span class="tag">PLAYERS</span>
+        <span class="block-title">玩家</span>
+        <span class="count">{{ player_count }}</span>
+      </div>
+      <div class="cards">
+        {% for p in players %}
+        <div class="pcard">
+          <div class="pname">{{ p.name }}</div>
+          <div class="pmeta"><span class="k">入店</span> {% if p.entered %}{{ p.entered }}{% else %}—{% endif %}</div>
+          <div class="pdur">{% if p.minutes is not none %}已玩 {{ p.minutes }} 分钟{% else %}时长统计中{% endif %}</div>
+        </div>
+        {% endfor %}
+      </div>
+    </section>
+
+    {% if staff_line %}
+    <section class="block staff">
+      <div class="block-head">
+        <span class="tag">STAFF</span>
+        <span class="block-title">管理 / 士大夫</span>
+        <span class="count">{{ staff_count }}</span>
+      </div>
+      <div class="cards">
+        {% for p in staff_line %}
+        <div class="pcard">
+          <div class="pname">{{ p.name }}</div>
+          <div class="pdur">在店中</div>
+        </div>
+        {% endfor %}
+      </div>
+    </section>
+    {% endif %}
+
+    <footer>
+      <span>共 {{ total_count }} 人在店</span>
+      <span>{{ source_host }}</span>
+      <span>DCSTREAM QUERY SYSTEM</span>
+    </footer>
+  </div>
+</body>
+</html>
