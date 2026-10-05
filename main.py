@@ -45,10 +45,13 @@ try:
         DEFAULT_PRICING,
         calculate_charge_fen,
         fetch_pricing_html,
+        fetch_visits_text,
         format_current_rate_message,
         format_fee_yuan,
         parse_pricing,
+        parse_visits_payload,
         parse_whosin_snapshot,
+        process_visit_records,
         snapshot_from_users,
     )
     from .dcs_render import WhosinRenderer
@@ -69,10 +72,13 @@ except ImportError:  # pragma: no cover - 取决于运行环境
         DEFAULT_PRICING,
         calculate_charge_fen,
         fetch_pricing_html,
+        fetch_visits_text,
         format_current_rate_message,
         format_fee_yuan,
         parse_pricing,
+        parse_visits_payload,
         parse_whosin_snapshot,
+        process_visit_records,
         snapshot_from_users,
     )
     from dcs_render import WhosinRenderer
@@ -131,10 +137,15 @@ class DcsWhosinPlugin(Star):
         self._adapter_patched: bool | None = None
         # 已见过的群（首次见到时记录一条日志，便于配置白名单）
         self._seen_groups: set[str] = set()
-        # 进/离店播报：快照状态、计费表缓存与后台任务
+        # 进/离店播报：快照状态、记录流状态、计费表缓存与后台任务
         self._presence: dict[str, dict] = {}
         self._presence_ready = False
         self._presence_task: asyncio.Task | None = None
+        self._presence_mode = "snapshot"  # snapshot（在店快照）/ records（访问记录流）
+        self._records_state: dict | None = None
+        self._records_fail_count = 0
+        self._records_tick_counter = 0
+        self._snapshot_recent_exits: dict[str, float] = {}
         self._pricing: dict | None = None
         self._pricing_at = 0.0
         self._pricing_default_logged = False
@@ -468,13 +479,20 @@ class DcsWhosinPlugin(Star):
         return self.plugin_data_dir / "presence_state.json"
 
     def _load_presence_state(self) -> None:
-        """插件启动时恢复最近的进离店快照（保鲜期内直接续算，避免漏报/误报）。"""
+        """插件启动时恢复进/离店状态（记录流去重表 或 在店快照）。"""
         try:
             path = self._presence_state_file()
             if not path.exists():
                 return
             data = json.loads(path.read_text(encoding="utf-8"))
             saved_at = float(data.get("saved_at") or 0)
+            if str(data.get("mode") or "snapshot") == "records":
+                seen = data.get("seen")
+                if isinstance(seen, dict):
+                    self._records_state = {"seen": seen}
+                    self._presence_mode = "records"
+                    logger.info(f"[dcs_whosin] 已恢复访客记录去重状态（{len(seen)} 条）")
+                return
             ttl_minutes = int(self.config.get("presence_state_ttl_minutes", 15) or 0)
             users = data.get("users")
             if (
@@ -487,19 +505,36 @@ class DcsWhosinPlugin(Star):
                 self._presence_ready = True
                 age_min = max(0, int((time.time() - saved_at) / 60))
                 logger.info(f"[dcs_whosin] 已恢复进离店快照（{len(self._presence)} 人，约 {age_min} 分钟前）")
+            exits = data.get("recent_exits")
+            if isinstance(exits, dict):
+                self._snapshot_recent_exits = {
+                    str(k): float(v) for k, v in exits.items() if isinstance(v, (int, float))
+                }
         except Exception as exc:  # noqa: BLE001
-            logger.warning(f"[dcs_whosin] 进离店快照恢复失败：{exc!r}")
+            logger.warning(f"[dcs_whosin] 进离店状态恢复失败：{exc!r}")
 
     def _save_presence_state(self) -> None:
         try:
             self.plugin_data_dir.mkdir(parents=True, exist_ok=True)
             path = self._presence_state_file()
             temp = path.with_suffix(".tmp")
-            payload = {"saved_at": time.time(), "users": self._presence}
+            if self._presence_mode == "records":
+                payload = {
+                    "mode": "records",
+                    "saved_at": time.time(),
+                    "seen": (self._records_state or {}).get("seen") or {},
+                }
+            else:
+                payload = {
+                    "mode": "snapshot",
+                    "saved_at": time.time(),
+                    "users": self._presence,
+                    "recent_exits": self._snapshot_recent_exits,
+                }
             temp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
             temp.replace(path)
         except Exception as exc:  # noqa: BLE001
-            logger.warning(f"[dcs_whosin] 进离店快照保存失败：{exc!r}")
+            logger.warning(f"[dcs_whosin] 进离店状态保存失败：{exc!r}")
 
     async def _presence_loop(self) -> None:
         """按配置间隔轮询站点，播报玩家进店 / 离店（含时长与扣费）。"""
@@ -518,6 +553,101 @@ class DcsWhosinPlugin(Star):
             await asyncio.sleep(interval)
 
     async def _presence_tick(self, interval: int) -> None:
+        """进离店检查：优先访问记录流（无盲区），不可用时自动退回在店快照。"""
+        if self._presence_mode == "records":
+            if await self._presence_tick_records(interval):
+                return
+            if self._records_fail_count < 5:
+                return  # 短暂故障：等下一轮立即重试，避免与快照重复播报
+            self._presence_mode = "snapshot"
+            self._presence_ready = False
+            logger.warning(
+                "[dcs_whosin] 访问记录接口持续不可用，已退回在店快照模式（每 10 分钟自动重试记录接口）"
+            )
+        else:
+            self._records_tick_counter += 1
+            if self._records_fail_count == 0 or self._records_tick_counter % 20 == 0:
+                if await self._presence_tick_records(interval):
+                    return
+        await self._presence_tick_snapshot(interval)
+
+    async def _presence_tick_records(self, interval: int) -> bool:
+        """用站点访问记录流做进离店播报（无盲区、扣费为真实结算金额）；失败返回 False。"""
+        urls = self.config.get("target_urls", DEFAULT_TARGET_URLS)
+        if isinstance(urls, str):
+            urls = [urls]
+        base_url = str(self.config.get("presence_visits_url", "") or "").strip()
+        if not base_url:
+            base = urls[0] if urls else DEFAULT_TARGET_URLS[0]
+            parts = urlsplit(base)
+            base_url = f"{parts.scheme}://{parts.netloc}/api/visits/recent"
+        url = f"{base_url}{'&' if '?' in base_url else '?'}limit=200"
+        fallback_ips = _as_list(self.config.get("fallback_ips", DEFAULT_FALLBACK_IPS))
+        timeout = int(self.config.get("timeout_seconds", 10) or 10)
+        text = None
+        try:
+            text = await fetch_visits_text(
+                [url],
+                fallback_ips,
+                timeout,
+                str(self.config.get("cookie", "") or ""),
+                str(self.config.get("login_username", "") or ""),
+                str(self.config.get("login_password", "") or ""),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[dcs_whosin] 访问记录接口请求失败：{exc!r}")
+        visits = parse_visits_payload(text) if text else None
+        if visits is None:
+            self._records_fail_count += 1
+            if self._records_fail_count == 1 and self._presence_mode != "records":
+                logger.info(
+                    "[dcs_whosin] 站点访问记录接口暂不可用，继续使用在店快照模式"
+                    "（站点端接口上线后会自动切换，无需重启）"
+                )
+            return False
+        self._records_fail_count = 0
+        if self._records_state is None or self._presence_mode != "records":
+            self._records_state = self._seed_records_state(visits)
+            self._presence_mode = "records"
+            logger.info("[dcs_whosin] 已启用访问记录模式（进离店无盲区，扣费为站点实际结算金额）")
+        now_ms = int(time.time() * 1000)
+        fresh_minutes = int(self.config.get("presence_record_fresh_minutes", 10) or 10)
+        prefix = str(self.config.get("presence_prefix", "【Kanade】") or "")
+        pricing = await self._get_pricing("")
+        messages, new_state = process_visit_records(
+            self._records_state, visits, now_ms, fresh_minutes, prefix, pricing
+        )
+        self._records_state = new_state
+        self._save_presence_state()
+        await self._broadcast_presence(messages)
+        return True
+
+    def _seed_records_state(self, visits: list[dict]) -> dict:
+        """从当前快照状态播种记录流去重表，模式切换时不重复播报。"""
+        present_keys: set[str] = set()
+        if self._presence_ready:
+            for user in self._presence.values():
+                uid = user.get("id")
+                entered = user.get("entered_ms")
+                if uid is not None and entered:
+                    present_keys.add(f"{uid}:{int(entered)}")
+        seen: dict[str, dict] = {}
+        for visit in visits:
+            key = f"{visit.get('user_id')}:{int(visit.get('entered_ms') or 0)}"
+            seen[str(visit.get("id"))] = {
+                "e": 1 if key in present_keys else 0,
+                "x": 1 if key in self._snapshot_recent_exits else 0,
+                "at": int(visit.get("entered_ms") or 0),
+            }
+        return {"seen": seen}
+
+    def _prune_recent_exits(self, now_ms: int) -> None:
+        keep = 2 * 3600 * 1000
+        self._snapshot_recent_exits = {
+            k: v for k, v in self._snapshot_recent_exits.items() if now_ms - v <= keep
+        }
+
+    async def _presence_tick_snapshot(self, interval: int) -> None:
         result = await self._fetch_data()
         if result.error or not result.raw_html:
             logger.warning(f"[dcs_whosin] 进离店检查失败：{result.error_kind or '未获取到页面'}")
@@ -571,6 +701,10 @@ class DcsWhosinPlugin(Star):
                 f"游玩{minutes}分钟\n"
                 f"扣费{format_fee_yuan(fee_fen)}元（线上余额）"
             )
+            uid = user.get("id")
+            if uid is not None and entered_ms:
+                self._snapshot_recent_exits[f"{uid}:{int(entered_ms)}"] = now_ms
+                self._prune_recent_exits(now_ms)
 
         self._presence = current
         self._save_presence_state()

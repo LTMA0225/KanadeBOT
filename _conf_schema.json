@@ -176,5 +176,17 @@
     "description": "计费表自动刷新间隔（小时；站点调价后自动跟随）",
     "type": "int",
     "default": 6
+  },
+  "presence_visits_url": {
+    "description": "站点访问记录接口地址（留空 = 自动使用目标站点的 /api/visits/recent）",
+    "type": "string",
+    "default": "",
+    "hint": "访问记录流模式可捕捉任意短时进离店，扣费为站点真实结算金额；接口不可用时自动退回在店快照模式"
+  },
+  "presence_record_fresh_minutes": {
+    "description": "记录流模式的播报保鲜时间（分钟）",
+    "type": "int",
+    "default": 10,
+    "hint": "更早的记录只做去重不再播报，避免机器人重启后补发大量旧消息"
   }
 }

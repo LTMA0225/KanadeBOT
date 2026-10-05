@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -338,7 +339,125 @@ def format_current_rate_message(
     return "\n".join([f"{prefix}当前时段价格", head, f"每小时：{hourly}"])
 
 
-async def fetch_pricing_html(
+def parse_visits_payload(text: str) -> Optional[List[Dict[str, Any]]]:
+    """解析站点 /api/visits/recent 返回的 JSON；格式不符时返回 None。"""
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(data, dict) or not data.get("success"):
+        return None
+    raw = data.get("visits")
+    if not isinstance(raw, list):
+        return None
+    visits: List[Dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        vid = item.get("id")
+        entered = item.get("enteredAt")
+        if vid is None or not isinstance(entered, (int, float)):
+            continue
+        left = item.get("leftAt")
+        charge = item.get("charge")
+        visits.append({
+            "id": int(vid),
+            "user_id": item.get("userId"),
+            "name": str(item.get("nickname") or "").strip(),
+            "role": _ROLE_MAP.get(str(item.get("role") or "CUSTOMER"), "player"),
+            "entered_ms": int(entered),
+            "left_ms": int(left) if isinstance(left, (int, float)) else None,
+            "charge": int(round(charge)) if isinstance(charge, (int, float)) else None,
+            "multiplier": item.get("chargeMultiplier"),
+        })
+    return visits
+
+
+def process_visit_records(
+    state: Dict[str, Any],
+    visits: List[Dict[str, Any]],
+    now_ms: int,
+    fresh_minutes: int,
+    prefix: str = "",
+    pricing: Optional[Dict[str, Any]] = None,
+) -> Tuple[List[str], Dict[str, Any]]:
+    """处理"访问记录流"，返回 (待发送消息列表, 新状态)。
+
+    以 visit id 去重（重复轮询不会重复播报）：
+    - 只播报玩家（CUSTOMER / 赞助者）；
+    - 进行中的访问：进店时间在保鲜期内则播报进店，否则静默建立记录；
+    - 已完成的访问：进店时间仍新鲜时补播进店；离店在保鲜期内则播报离店
+      （游玩分钟向上取整；扣费优先用站点结算的真实金额，缺失时按计费表估算）；
+    - 记录保留 24 小时、最多 500 条（超出按时间截断）。
+    """
+    seen: Dict[str, Any] = {}
+    old = state.get("seen")
+    if isinstance(old, dict):
+        seen = {str(k): v for k, v in old.items() if isinstance(v, dict)}
+    fresh_ms = max(1, int(fresh_minutes)) * 60000
+    messages: List[str] = []
+
+    for visit in sorted(visits, key=lambda item: int(item.get("entered_ms") or 0)):
+        vid = str(visit.get("id"))
+        name = str(visit.get("name") or "")
+        entered = int(visit.get("entered_ms") or 0)
+        left = visit.get("left_ms")
+        record = seen.get(vid) or {}
+        entry_done = bool(record.get("e"))
+        exit_done = bool(record.get("x"))
+
+        if visit.get("role") != "player" or not name or not entered:
+            seen[vid] = {"e": 1, "x": 1, "at": entered or int(now_ms)}
+            continue
+
+        if left is None:
+            if not entry_done:
+                if now_ms - entered <= fresh_ms:
+                    messages.append(f"{prefix}{name}进店了")
+                entry_done = True
+            seen[vid] = {"e": 1 if entry_done else 0, "x": 0, "at": entered}
+            continue
+
+        left = int(left)
+        if not entry_done:
+            if now_ms - entered <= fresh_ms:
+                messages.append(f"{prefix}{name}进店了")
+            entry_done = True
+
+        if not exit_done:
+            if now_ms - left <= fresh_ms:
+                charge = visit.get("charge")
+                if charge is None and pricing:
+                    try:
+                        multiplier = (
+                            float(visit.get("multiplier"))
+                            if visit.get("multiplier") is not None
+                            else 1.0
+                        )
+                    except (TypeError, ValueError):
+                        multiplier = 1.0
+                    charge = calculate_charge_fen(entered, left, pricing, multiplier)
+                minutes = max(0, math.ceil((left - entered) / 60000))
+                messages.append(
+                    f"{prefix}{name}离店了\n"
+                    f"游玩{minutes}分钟\n"
+                    f"扣费{format_fee_yuan(charge or 0)}元（线上余额）"
+                )
+            exit_done = True
+
+        seen[vid] = {"e": 1 if entry_done else 0, "x": 1 if exit_done else 0, "at": entered}
+
+    keep_ms = 24 * 3600 * 1000
+    pruned = {k: v for k, v in seen.items() if now_ms - int(v.get("at") or 0) <= keep_ms}
+    if len(pruned) > 500:
+        newest = sorted(pruned.items(), key=lambda kv: int(kv[1].get("at") or 0), reverse=True)[:500]
+        pruned = dict(newest)
+    return messages, {"seen": pruned}
+
+
+async def _fetch_authed_text(
     urls: List[str],
     fallback_ips: List[str],
     timeout: int,
@@ -346,7 +465,7 @@ async def fetch_pricing_html(
     username: str,
     password: str,
 ) -> Optional[str]:
-    """按 dcs_api 的线路与登录链路抓取计费表页面 HTML；失败返回 None。"""
+    """按 dcs_api 的线路与登录链路抓取一个需登录的页面/接口文本；失败返回 None。"""
     try:
         from . import dcs_api as api  # type: ignore
     except ImportError:  # pragma: no cover - 目录导入方式
@@ -365,3 +484,27 @@ async def fetch_pricing_html(
             continue
         return body
     return None
+
+
+async def fetch_pricing_html(
+    urls: List[str],
+    fallback_ips: List[str],
+    timeout: int,
+    cookie: str,
+    username: str,
+    password: str,
+) -> Optional[str]:
+    """抓取计费表页面 HTML（/chargecalc）。"""
+    return await _fetch_authed_text(urls, fallback_ips, timeout, cookie, username, password)
+
+
+async def fetch_visits_text(
+    urls: List[str],
+    fallback_ips: List[str],
+    timeout: int,
+    cookie: str,
+    username: str,
+    password: str,
+) -> Optional[str]:
+    """抓取站点访问记录接口 JSON 文本（/api/visits/recent）。"""
+    return await _fetch_authed_text(urls, fallback_ips, timeout, cookie, username, password)
