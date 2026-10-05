@@ -274,6 +274,70 @@ def format_fee_yuan(fen: float) -> str:
     return f"{fen / 100:.2f}"
 
 
+def _format_clock(minute: int) -> str:
+    minute = int(minute) % 1440
+    return f"{minute // 60:02d}:{minute % 60:02d}"
+
+
+def format_discount_zhe(ratio: float) -> str:
+    """把折扣倍率格式化为"折"（0.7 -> "7折"，0.75 -> "7.5折"，与站点展示一致）。"""
+    raw = int(round(float(ratio) * 100))
+    if raw % 10 == 0:
+        return f"{raw // 10}折"
+    return f"{raw // 10}.{raw % 10}折"
+
+
+def current_rate_info(pricing: Dict[str, Any], now_ms: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    """返回当前时段的费率信息（供 /jg 指令展示）。"""
+    segments = [s for s in (pricing.get("circadyRates") or []) if isinstance(s, dict)]
+    if not segments:
+        return None
+    now = int(now_ms if now_ms is not None else time.time() * 1000)
+    minute = _clock_minutes(now)
+    try:
+        global_discount = float(pricing.get("globalDiscount") or 0)
+    except (TypeError, ValueError):
+        global_discount = 0.0
+    for segment in segments:
+        start = int(segment.get("startMinute", 0))
+        end = int(segment.get("endMinute", 0))
+        if not (start <= minute < end):
+            continue
+        rate = float(segment.get("rate", 0) or 0)
+        applied = bool(segment.get("globalDiscountApply"))
+        multiplier = global_discount if (applied or global_discount == 0) else 1.0
+        base_fen = rate * 60
+        return {
+            "start": _format_clock(start),
+            "end": "24:00" if end >= 1440 else _format_clock(end),
+            "comment": str(segment.get("comment") or ""),
+            "maxout": segment.get("maxout"),
+            "base_fen": base_fen,
+            "final_fen": base_fen * multiplier,
+            "discount": multiplier,
+        }
+    return None
+
+
+def format_current_rate_message(
+    pricing: Dict[str, Any], prefix: str = "", now_ms: Optional[int] = None
+) -> Optional[str]:
+    """生成 /jg 的回复文本：本时段每小时游玩价格（含折扣与封顶说明）。"""
+    info = current_rate_info(pricing, now_ms)
+    if not info:
+        return None
+    head = f"时段：{info['start']}-{info['end']}"
+    if info["comment"]:
+        head += f"（{info['comment']}）"
+    hourly = f"¥{info['final_fen'] / 100:.2f}"
+    if info["final_fen"] != info["base_fen"]:
+        if info["final_fen"] == 0:
+            hourly += "（限时免费）"
+        else:
+            hourly += f"（原价 ¥{info['base_fen'] / 100:.2f}，{format_discount_zhe(info['discount'])}）"
+    return "\n".join([f"{prefix}当前时段价格", head, f"每小时：{hourly}"])
+
+
 async def fetch_pricing_html(
     urls: List[str],
     fallback_ips: List[str],

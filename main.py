@@ -45,6 +45,7 @@ try:
         DEFAULT_PRICING,
         calculate_charge_fen,
         fetch_pricing_html,
+        format_current_rate_message,
         format_fee_yuan,
         parse_pricing,
         parse_whosin_snapshot,
@@ -68,6 +69,7 @@ except ImportError:  # pragma: no cover - 取决于运行环境
         DEFAULT_PRICING,
         calculate_charge_fen,
         fetch_pricing_html,
+        format_current_rate_message,
         format_fee_yuan,
         parse_pricing,
         parse_whosin_snapshot,
@@ -333,6 +335,26 @@ class DcsWhosinPlugin(Star):
         if not self._policy_allows(event):
             return
         yield event.plain_result("25時、ナイトコードで")
+
+    # ------------------------------------------------------------------
+    # 指令：jg —— 本时段每小时游玩价格
+    # ------------------------------------------------------------------
+    @filter.command("jg")
+    async def current_price(self, event: AstrMessageEvent):
+        """查询本时段每小时游玩价格（含折扣与封顶说明，不设冷却）"""
+        if not self._policy_allows(event):
+            return
+        try:
+            pricing = await self._get_pricing("")
+            prefix = str(self.config.get("presence_prefix", "【Kanade】") or "")
+            text = format_current_rate_message(pricing, prefix)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[dcs_whosin] 时段价格查询失败：{exc!r}")
+            text = None
+        if text:
+            yield event.plain_result(text)
+        else:
+            yield event.plain_result("价格查询失败，请稍后再试。")
 
     # ------------------------------------------------------------------
     # 静默策略：私聊开关 / 群白名单 / 频率限制
