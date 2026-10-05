@@ -1,12 +1,19 @@
 {
   "target_urls": {
-    "description": "目标网页地址（按顺序尝试，前一个失败自动切换下一个）",
+    "description": "目标网页地址（按顺序尝试；只建议使用 HTTPS）",
     "type": "list",
     "default": [
-      "https://dcstream.top/whosin",
-      "http://47.116.47.191/whosin"
+      "https://dcstream.top/whosin"
     ],
-    "hint": "格式示例：[\"https://dcstream.top/whosin\", \"http://47.116.47.191/whosin\"]"
+    "hint": "格式示例：[\"https://dcstream.top/whosin\"]。明文 http:// 地址只会匿名访问，不会发送账号密码或 Cookie"
+  },
+  "fallback_ips": {
+    "description": "备用 IP（域名访问失败时直连；证书仍按域名校验，不会降级为明文）",
+    "type": "list",
+    "default": [
+      "47.116.47.191"
+    ],
+    "hint": "格式示例：[\"47.116.47.191\"]；留空 = 不使用备用 IP"
   },
   "timeout_seconds": {
     "description": "爬取超时时间（秒）",
@@ -14,7 +21,7 @@
     "default": 10
   },
   "cookie": {
-    "description": "站点 Cookie（当目标页面要求登录时填写）",
+    "description": "站点 Cookie（当目标页面要求登录时填写；只经 HTTPS 发送）",
     "type": "string",
     "default": "",
     "secret": true,
@@ -27,7 +34,7 @@
     "hint": "填写后插件会自动登录站点获取会话，无需手动维护 Cookie"
   },
   "login_password": {
-    "description": "站点密码（自动登录用）",
+    "description": "站点密码（自动登录用；只经 HTTPS 发送）",
     "type": "string",
     "default": "",
     "secret": true
@@ -50,13 +57,36 @@
     ],
     "default": "cyberpunk-bw"
   },
+  "render_browser": {
+    "description": "本地渲染使用的浏览器内核",
+    "type": "string",
+    "options": [
+      "auto",
+      "msedge",
+      "chrome",
+      "chromium"
+    ],
+    "default": "auto",
+    "hint": "auto = 依次尝试 Edge → Chrome → Playwright 自带 Chromium；Windows 自带 Edge，无需额外下载"
+  },
+  "render_browser_path": {
+    "description": "自定义浏览器可执行文件路径（可选，填写后优先使用）",
+    "type": "string",
+    "default": "",
+    "hint": "例如 C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe；一般留空即可"
+  },
+  "render_timeout_seconds": {
+    "description": "单次图片渲染超时（秒，含首次启动浏览器；超时则改发文字版）",
+    "type": "int",
+    "default": 20
+  },
   "cooldown_seconds": {
-    "description": "同一用户在同一群的指令冷却（秒，0 表示不限制）",
+    "description": "/j 冷却：同一用户在同一群的查询间隔（秒，0 表示不限制；/25h 不受限制）",
     "type": "int",
     "default": 60
   },
   "group_interval_seconds": {
-    "description": "同一群内两次回复的最小间隔（秒，0 表示不限制）",
+    "description": "/j 同群回复最小间隔（秒，0 表示不限制；并发查询会依次排队）",
     "type": "int",
     "default": 5
   },
@@ -67,24 +97,79 @@
     "hint": "格式示例：[\"123456789\"]；填上你的群号可把机器人锁死在该群"
   },
   "allow_private_chat": {
-    "description": "是否响应私聊指令",
+    "description": "是否响应私聊指令（与群白名单互不影响）",
     "type": "bool",
-    "default": false
+    "default": false,
+    "hint": "注意：DCS 适配器补丁与 AstrBot 白名单默认会在更早阶段丢弃私聊，单开此项不会生效"
   },
   "status_push_enable": {
-    "description": "定期状态推送（按间隔向目标会话发送机器人状态）",
+    "description": "状态推送（向维护者推送机器人与站点状态）",
     "type": "bool",
     "default": false
   },
+  "status_push_mode": {
+    "description": "状态推送模式",
+    "type": "string",
+    "options": [
+      "smart",
+      "interval"
+    ],
+    "default": "smart",
+    "hint": "smart = 只在启动、站点异常/恢复时推送，外加定时心跳（推荐，降低协议号风控风险）；interval = 每次检查都推送"
+  },
   "status_push_interval_seconds": {
-    "description": "状态推送间隔（秒，默认 600 = 10 分钟）",
+    "description": "状态检查间隔（秒，默认 600 = 10 分钟；interval 模式下即推送间隔）",
     "type": "int",
     "default": 600
   },
+  "status_heartbeat_hours": {
+    "description": "smart 模式的心跳间隔（小时，0 = 不发心跳）",
+    "type": "int",
+    "default": 24
+  },
   "status_push_targets": {
-    "description": "状态推送目标会话列表（格式：平台ID:FriendMessage:用户openid）",
+    "description": "状态推送目标会话列表（格式：平台ID:FriendMessage:QQ号）",
     "type": "list",
     "default": [],
-    "hint": "示例：[\"default_1905699951:FriendMessage:xxxxxxxx\"]；主号先给机器人发一条消息，再把会话地址填进来"
+    "hint": "示例：[\"napcat:FriendMessage:123456789\"]；目标需是机器人号的好友"
+  },
+  "presence_notify_enable": {
+    "description": "进/离店播报（自动在群里播报玩家进店 / 离店）",
+    "type": "bool",
+    "default": false,
+    "hint": "只播报玩家（不播报管理/士大夫）；离店播报含游玩时长与扣费金额"
+  },
+  "presence_check_interval_seconds": {
+    "description": "进/离店检查间隔（秒）",
+    "type": "int",
+    "default": 60,
+    "hint": "建议 30-120；越短越及时，离店费用结算误差也越小（取两次轮询的中点结算）"
+  },
+  "presence_targets": {
+    "description": "进/离店播报目标会话（格式：平台ID:GroupMessage:群号）",
+    "type": "list",
+    "default": [],
+    "hint": "示例：[\"napcat:GroupMessage:1030377150\"]；留空 = 自动发到 allowed_groups 配置的群"
+  },
+  "presence_state_ttl_minutes": {
+    "description": "重启后的快照保鲜时间（分钟）",
+    "type": "int",
+    "default": 15,
+    "hint": "插件重启时，若上次快照在此时间内则继续对比（不漏报）；超时则重新建立基线"
+  },
+  "presence_min_gap_seconds": {
+    "description": "多条播报之间的最小间隔（秒）",
+    "type": "int",
+    "default": 2
+  },
+  "presence_pricing_url": {
+    "description": "计费表页面地址（留空 = 自动使用目标站点的 /chargecalc 页面）",
+    "type": "string",
+    "default": ""
+  },
+  "presence_pricing_refresh_hours": {
+    "description": "计费表自动刷新间隔（小时；站点调价后自动跟随）",
+    "type": "int",
+    "default": 6
   }
 }

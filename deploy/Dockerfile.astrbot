@@ -1,0 +1,9 @@
+# AstrBot + 本地图片渲染依赖（Playwright 自带 Chromium 与中日文字体），供 docker-compose.yml 构建
+FROM soulter/astrbot:latest
+# 镜像拉取失败时改用：FROM m.daocloud.io/docker.io/soulter/astrbot:latest
+
+RUN pip install --no-cache-dir "jinja2>=3.1" "playwright>=1.49" \
+    && python -m playwright install --with-deps chromium \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/*

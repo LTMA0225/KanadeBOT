@@ -1,25 +1,28 @@
-# 直流会馆 QQ 机器人：AstrBot + NapCat Docker 编排
+# 直流会馆 QQ 机器人：AstrBot + NapCat Docker 编排（服务器部署用；Windows 桌面请用迁移包里的一键部署）
 # 使用方法：
-#   1. 在本目录执行 docker compose up -d
-#   2. 首次启动后：NapCat WebUI（http://<主机>:6099）扫码登录机器人 QQ
-#   3. NapCat 网络配置 - 新建 - WebSocket 反向，URL 填：ws://astrbot:6199/ws
-#   4. AstrBot WebUI（http://<主机>:6185）：消息平台 - 新增 aiocqhttp 适配器
+#   1. 在本目录执行 docker compose up -d --build
+#   2. 首次启动后：NapCat WebUI（http://127.0.0.1:6099）扫码登录机器人 QQ
+#      管理端口只绑定宿主机 127.0.0.1，远程管理请用 SSH 隧道：ssh -L 6099:127.0.0.1:6099 -L 6185:127.0.0.1:6185 <服务器>
+#   3. NapCat 网络配置 - 新建 - WebSocket 反向，URL 填：ws://astrbot:6199/ws（建议两端设置相同的 token）
+#   4. AstrBot WebUI（http://127.0.0.1:6185）：消息平台 - 新增 aiocqhttp 适配器（反向 WS 端口 6199）
+# 安全：6199 只在容器内部网络开放，不映射到宿主机；插件以只读方式挂载，图片缓存写在 data/plugin_data。
 # 中国大陆网络拉取镜像失败时，可在镜像名前加前缀 m.daocloud.io/docker.io/
 
 services:
   astrbot:
-    image: soulter/astrbot:latest
-    # 镜像拉取失败时改用：m.daocloud.io/docker.io/soulter/astrbot:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.astrbot
+    image: dcs-astrbot:local
     container_name: dcs-astrbot
     restart: unless-stopped
     environment:
       - TZ=Asia/Shanghai
     ports:
-      - "6185:6185"   # AstrBot 管理面板
-      - "6199:6199"   # OneBot v11 反向 WebSocket 端口
+      - "127.0.0.1:6185:6185"   # AstrBot 管理面板（仅宿主机本机可访问）
     volumes:
       - ./data:/AstrBot/data
-      # 将插件目录挂载进 AstrBot 插件目录（本文件位于插件 deploy/ 下）
+      # 将插件目录只读挂载进 AstrBot 插件目录（本文件位于插件 deploy/ 下）
       - ../:/AstrBot/data/plugins/astrbot_plugin_dcs_whosin:ro
     networks:
       - dcs-bot
@@ -34,9 +37,7 @@ services:
       - NAPCAT_UID=1000
       - NAPCAT_GID=1000
     ports:
-      - "6099:6099"   # NapCat WebUI（配置与扫码登录）
-      - "3000:3000"   # HTTP 服务端口
-      - "3001:3001"   # HTTP 服务端口（备用）
+      - "127.0.0.1:6099:6099"   # NapCat WebUI（仅宿主机本机可访问）
     volumes:
       - ./napcat/config:/app/napcat/config
       - ./napcat/qq:/app/.config/QQ
