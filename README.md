@@ -1,4 +1,4 @@
-# 直流会馆 QQ 查询机器人（AstrBot 插件）v2.1.0
+# 直流会馆 QQ 查询机器人（AstrBot 插件）v2.1.1
 
 基于 **AstrBot + NapCat** 的 QQ 群机器人：查询「直流会馆」店内实时在店人员，
 以**赛博朋克风图片 + 文本**返回，附带娱乐指令。
@@ -28,12 +28,25 @@
   不暴露地址、IP 或异常细节；详细原因写入 AstrBot 日志，并通过状态推送告知维护者；
 - 图片渲染失败或超时时降级为文字版，插件不会崩溃。
 
-## 进/离店播报（v2.1.0 新增）
+## 进/离店播报
 
 开启 `presence_notify_enable` 后，插件按固定间隔轮询站点，**自动在群里播报**：
 
-- 玩家进店：`XXX进店了哦！`
-- 玩家离店：`XXX离店了，游玩XXX分钟，扣费X.XX元`
+- 玩家进店：
+
+  ```
+  【Kanade】XXX进店了
+  ```
+
+- 玩家离店（竖向排版）：
+
+  ```
+  【Kanade】XXX离店了
+  游玩XXX分钟
+  扣费X.XX元（线上余额）
+  ```
+
+- 游玩时长**向上取整**（不足 1 分钟按 1 分钟计）；扣费按站点计费规则精确到分；前缀可在 `presence_prefix` 配置；
 
 实现要点：
 
@@ -148,7 +161,8 @@ docker compose up -d --build
 | `status_heartbeat_hours` | int | `24` | `smart` 模式的心跳间隔（小时，0 = 不发心跳） |
 | `status_push_targets` | list | `[]` | 推送目标，格式 `napcat:FriendMessage:QQ号`（需是机器人号的好友） |
 | `presence_notify_enable` | bool | `false` | 进/离店播报开关（只播报玩家） |
-| `presence_check_interval_seconds` | int | `60` | 进/离店检查间隔（秒，范围 30-3600） |
+| `presence_check_interval_seconds` | int | `30` | 进/离店检查间隔（秒，范围 15-3600） |
+| `presence_prefix` | string | `【Kanade】` | 播报消息前缀（第一条行首） |
 | `presence_targets` | list | `[]` | 播报目标，格式 `napcat:GroupMessage:群号`；留空 = 自动用 `allowed_groups` |
 | `presence_state_ttl_minutes` | int | `15` | 重启后快照保鲜时间（分钟内可续算，避免漏报） |
 | `presence_min_gap_seconds` | int | `2` | 多条播报之间的最小发送间隔（秒） |

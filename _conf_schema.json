@@ -142,8 +142,13 @@
   "presence_check_interval_seconds": {
     "description": "进/离店检查间隔（秒）",
     "type": "int",
-    "default": 60,
-    "hint": "建议 30-120；越短越及时，离店费用结算误差也越小（取两次轮询的中点结算）"
+    "default": 30,
+    "hint": "建议 15-120；越短越及时，离店费用结算误差也越小（取两次轮询的中点结算）"
+  },
+  "presence_prefix": {
+    "description": "播报消息前缀（显示在第一条行首）",
+    "type": "string",
+    "default": "【Kanade】"
   },
   "presence_targets": {
     "description": "进/离店播报目标会话（格式：平台ID:GroupMessage:群号）",

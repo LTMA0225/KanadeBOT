@@ -16,6 +16,7 @@ import importlib
 import importlib.util
 import inspect
 import json
+import math
 import sys
 import tempfile
 import time
@@ -485,7 +486,7 @@ class DcsWhosinPlugin(Star):
             interval = 60
             try:
                 interval = int(self.config.get("presence_check_interval_seconds", 60) or 60)
-                interval = min(max(interval, 30), 3600)
+                interval = min(max(interval, 15), 3600)
                 if self.config.get("presence_notify_enable", False):
                     await self._presence_tick(interval)
             except asyncio.CancelledError:
@@ -522,9 +523,10 @@ class DcsWhosinPlugin(Star):
             if key not in current and user.get("role") == "player"
         ]
 
+        prefix = str(self.config.get("presence_prefix", "【Kanade】") or "")
         messages: list[str] = []
         for user in entries:
-            messages.append(f"{user.get('name', '')}进店了哦！")
+            messages.append(f"{prefix}{user.get('name', '')}进店了")
         for user in exits:
             entered_ms = user.get("entered_ms")
             if not entered_ms:
@@ -534,7 +536,8 @@ class DcsWhosinPlugin(Star):
             gap = max(0, now_ms - last_seen)
             # 真实离店发生在（最后在店, 本次发现]之间，取中点降低误差
             settle_ms = last_seen + min(gap, interval * 1000) // 2
-            minutes = max(0, int((settle_ms - int(entered_ms)) // 60000))
+            # 游玩时长向上取整（不足 1 分钟按 1 分钟计）
+            minutes = max(0, math.ceil((settle_ms - int(entered_ms)) / 60000))
             pricing = await self._get_pricing(result.source_url)
             try:
                 multiplier = float(user.get("multiplier")) if user.get("multiplier") is not None else 1.0
@@ -542,7 +545,9 @@ class DcsWhosinPlugin(Star):
                 multiplier = 1.0
             fee_fen = calculate_charge_fen(int(entered_ms), settle_ms, pricing, multiplier)
             messages.append(
-                f"{user.get('name', '')}离店了，游玩{minutes}分钟，扣费{format_fee_yuan(fee_fen)}元"
+                f"{prefix}{user.get('name', '')}离店了\n"
+                f"游玩{minutes}分钟\n"
+                f"扣费{format_fee_yuan(fee_fen)}元（线上余额）"
             )
 
         self._presence = current
