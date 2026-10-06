@@ -212,5 +212,17 @@
     "default": "",
     "secret": true,
     "hint": "留空 = 不校验令牌（不建议）；设置后校验请求头 X-DCS-Token"
+  },
+  "mj_enable": {
+    "description": "mj 指令（发送 bot 收藏的表情包）",
+    "type": "bool",
+    "default": true,
+    "hint": "/mj 发送表情；/mjlist 列出收藏编号（用 mj_sticker_index 选择）"
+  },
+  "mj_sticker_index": {
+    "description": "使用收藏表情中的第几个（从 0 开始）",
+    "type": "int",
+    "default": 0,
+    "hint": "先在群里发 /mjlist 查看编号，再填到这里"
   }
 }

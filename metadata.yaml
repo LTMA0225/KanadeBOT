@@ -1,8 +1,8 @@
 name: astrbot_plugin_dcs_whosin
 display_name: 直流会馆查询机器人
-desc: 查询直流会馆店内实时在店人员（玩家 / 管理员 / 士大夫），本机渲染赛博朋克风图片 + 文本返回；自动播报玩家进店/离店（Webhook 实时 + 记录流 + 快照三通道统一去重；含时长与真实扣费）；附带 25h 与时段价格查询（jg）指令。
-short_desc: 直流会馆在店查询（/j）+ 进离店播报（Webhook/记录流）+ /jg 时段价格 + /25h
-version: v2.3.0
+desc: 查询直流会馆店内实时在店人员（玩家 / 管理员 / 士大夫），本机渲染赛博朋克风图片 + 文本返回；自动播报玩家进店/离店（Webhook 实时 + 记录流 + 快照三通道统一去重；含时长与真实扣费）；附带 25h、时段价格查询（jg）与收藏表情（mj）指令。
+short_desc: 直流会馆在店查询（/j）+ 进离店播报（Webhook/记录流）+ /jg 时段价格 + /mj 表情 + /25h
+version: v2.4.0
 author: 直流会馆
 support_platforms:
   - aiocqhttp

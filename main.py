@@ -41,6 +41,12 @@ try:
         format_text_message,
         public_error_text,
     )
+    from .dcs_mj import (
+        download_sticker,
+        find_cached_sticker,
+        normalize_custom_faces,
+        pick_sticker,
+    )
     from .dcs_presence import (
         DEFAULT_PRICING,
         calculate_charge_fen,
@@ -70,6 +76,12 @@ except ImportError:  # pragma: no cover - 取决于运行环境
         fetch_whosin_users,
         format_text_message,
         public_error_text,
+    )
+    from dcs_mj import (
+        download_sticker,
+        find_cached_sticker,
+        normalize_custom_faces,
+        pick_sticker,
     )
     from dcs_presence import (
         DEFAULT_PRICING,
@@ -152,6 +164,7 @@ class DcsWhosinPlugin(Star):
         self._records_fail_count = 0
         self._records_tick_counter = 0
         self._webhook = None  # WebhookReceiver，在 initialize 中创建
+        self._mj_task: asyncio.Task | None = None  # /mj 表情预取任务
         self._pricing: dict | None = None
         self._pricing_at = 0.0
         self._pricing_default_logged = False
@@ -193,6 +206,9 @@ class DcsWhosinPlugin(Star):
             await self._webhook.start()
         else:
             logger.info("[dcs_whosin] Webhook 接收服务未启用（webhook_enable=false）")
+        if self.config.get("mj_enable", True):
+            if self._mj_task is None or self._mj_task.done():
+                self._mj_task = asyncio.create_task(self._mj_prefetch())
         if self._status_task and not self._status_task.done():
             return
         self._status_task = asyncio.create_task(self._status_loop())
@@ -383,6 +399,52 @@ class DcsWhosinPlugin(Star):
             yield event.plain_result(text)
         else:
             yield event.plain_result("价格查询失败，请稍后再试。")
+
+    # ------------------------------------------------------------------
+    # 指令：mj —— 发送 bot 收藏的表情包
+    # ------------------------------------------------------------------
+    @filter.command("mj")
+    async def mj_sticker(self, event: AstrMessageEvent):
+        """发送 bot 收藏的表情包（不设冷却；受同群最小间隔约束）"""
+        if not self._policy_allows(event):
+            return
+        if not self.config.get("mj_enable", True):
+            return
+        await self._wait_group_slot(event)
+        index = self._mj_index()
+        path = find_cached_sticker(self.plugin_data_dir, index)
+        if path is None:
+            bot = getattr(event, "bot", None)
+            path = await self._fetch_and_cache_sticker(bot, index)
+        if path:
+            yield event.chain_result([Image.fromFileSystem(str(path))])
+        else:
+            yield event.plain_result("表情包还没准备好，稍后再试试～")
+
+    # ------------------------------------------------------------------
+    # 指令：mjlist —— 列出收藏表情编号（用于选择 mj_sticker_index）
+    # ------------------------------------------------------------------
+    @filter.command("mjlist")
+    async def mj_list(self, event: AstrMessageEvent):
+        """列出 bot 收藏的表情（编号 + 图片，方便选择 mj_sticker_index）"""
+        if not self._policy_allows(event):
+            return
+        if not self.config.get("mj_enable", True):
+            return
+        bot = getattr(event, "bot", None)
+        urls = await self._fetch_custom_faces(bot)
+        if not urls:
+            yield event.plain_result("没有读取到收藏表情（该 QQ 号的收藏表情为空或接口暂不可用）")
+            return
+        for i, url in enumerate(urls[:12]):
+            path = find_cached_sticker(self.plugin_data_dir, i)
+            if path is None:
+                path = await download_sticker(url, self.plugin_data_dir, i)
+            if path:
+                yield event.chain_result([Plain(f"第 {i} 个"), Image.fromFileSystem(str(path))])
+                await asyncio.sleep(1)
+        if len(urls) > 12:
+            yield event.plain_result(f"（收藏共 {len(urls)} 个，仅显示前 12 个）")
 
     # ------------------------------------------------------------------
     # 静默策略：私聊开关 / 群白名单 / 频率限制
@@ -884,11 +946,74 @@ class DcsWhosinPlugin(Star):
         self._pricing_at = now - ttl // 2
         return self._pricing
 
+    # ------------------------------------------------------------------
+    # /mj 收藏表情辅助
+    # ------------------------------------------------------------------
+    def _platform_id(self) -> str:
+        for key in ("presence_targets", "status_push_targets"):
+            for target in _as_list(self.config.get(key)):
+                if ":" in target:
+                    return target.split(":", 1)[0]
+        return "napcat"
+
+    def _mj_index(self) -> int:
+        try:
+            index = int(self.config.get("mj_sticker_index", 0) or 0)
+        except (TypeError, ValueError):
+            index = 0
+        return max(0, index)
+
+    async def _fetch_custom_faces(self, bot) -> list[str]:
+        if bot is None:
+            return []
+        try:
+            data = await bot.call_action("fetch_custom_face")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[dcs_whosin] 获取收藏表情失败：{exc!r}")
+            return []
+        return normalize_custom_faces(data)
+
+    async def _fetch_and_cache_sticker(self, bot, index: int):
+        urls = await self._fetch_custom_faces(bot)
+        url = pick_sticker(urls, index)
+        if not url:
+            logger.warning("[dcs_whosin] /mj 收藏表情列表为空或索引越界")
+            return None
+        path = await download_sticker(url, self.plugin_data_dir, index)
+        if path:
+            logger.info(f"[dcs_whosin] /mj 表情包已缓存（第 {index} 个，收藏共 {len(urls)} 个）")
+        else:
+            logger.warning("[dcs_whosin] /mj 表情包下载失败（链接可能已过期，稍后重试）")
+        return path
+
+    async def _mj_prefetch(self) -> None:
+        """插件启动后预取并缓存 /mj 表情；日志会显示收藏数量便于核对。"""
+        await asyncio.sleep(25)
+        try:
+            index = self._mj_index()
+            if find_cached_sticker(self.plugin_data_dir, index):
+                return
+            platform = self.context.get_platform_inst(self._platform_id())
+            bot = getattr(platform, "bot", None) if platform is not None else None
+            if bot is None and platform is not None and hasattr(platform, "get_client"):
+                try:
+                    bot = platform.get_client()
+                except Exception:  # noqa: BLE001
+                    bot = None
+            if bot is None:
+                logger.info("[dcs_whosin] /mj 预取：napcat 平台未就绪，将在首次使用时获取")
+                return
+            await self._fetch_and_cache_sticker(bot, index)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[dcs_whosin] /mj 预取失败：{exc!r}")
+
     async def terminate(self):
         """插件被卸载 / 停用时停止后台任务与 Webhook 服务，关闭本地浏览器并清理图片缓存。"""
         if self._webhook is not None:
             await self._webhook.stop()
-        for task in (self._status_task, self._deps_task, self._presence_task):
+        for task in (self._status_task, self._deps_task, self._presence_task, self._mj_task):
             if task and not task.done():
                 task.cancel()
         await self.renderer.close()
