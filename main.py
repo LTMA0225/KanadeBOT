@@ -1057,27 +1057,31 @@ class DcsWhosinPlugin(Star):
 
         prefix = str(self.config.get("presence_prefix", "【Kanade】") or "")
         result = None
-        # 通道一（无需站点更新）：在店快照按 QQ 绑定找账号 → 工作人员代离店接口
+        channel = ""
+        # 主方案：站点机器人接口（/api/bot/action，需站点已部署；返回精确业务结果）
+        api_result = None
         try:
-            result = await self._attend_leave_via_snapshot(qq)
+            api_result = await self._attend_leave_via_api(qq)
         except Exception as exc:  # noqa: BLE001
-            logger.warning(f"[dcs_whosin] @bot 自助离店（快照通道）异常：{exc!r}")
-        # 通道二（站点部署机器人接口后可用，错误提示更精确）：/api/bot/action
-        if result is None or str(result.get("error") or "") == "NOT_FOUND":
+            logger.warning(f"[dcs_whosin] @bot 自助离店（接口通道）异常：{exc!r}")
+        api_error = str(api_result.get("error") or "") if isinstance(api_result, dict) else ""
+        definitive = {"NOT_BOUND", "NOT_IN", "BAD_QQ", "BAD_ACTION"}
+        if isinstance(api_result, dict) and (api_result.get("success") or api_error in definitive):
+            result = api_result
+            channel = "接口"
+        else:
+            # 备用方案（无需站点更新）：在店快照按 QQ 绑定找账号 → 工作人员代离店
+            fallback_result = None
             try:
-                api_result = await self._attend_leave_via_api(qq)
+                fallback_result = await self._attend_leave_via_snapshot(qq)
             except Exception as exc:  # noqa: BLE001
-                logger.warning(f"[dcs_whosin] @bot 自助离店（接口通道）异常：{exc!r}")
-                api_result = None
-            if isinstance(api_result, dict):
-                api_error = str(api_result.get("error") or "")
-                if api_result.get("success") or api_error in (
-                    "NOT_BOUND",
-                    "NOT_IN",
-                    "UNAUTHORIZED",
-                    "NO_TOKEN",
-                ):
-                    result = api_result
+                logger.warning(f"[dcs_whosin] @bot 自助离店（快照通道）异常：{exc!r}")
+            if fallback_result is not None:
+                result = fallback_result
+                channel = "本地"
+            else:
+                result = api_result  # 保留接口错误（或 None）用于提示
+                channel = "接口"
 
         text, meta = format_attend_reply(action, result, prefix)
         if meta and meta.get("key"):
@@ -1089,15 +1093,12 @@ class DcsWhosinPlugin(Star):
             )
             self._save_presence_state()
         first_line = text.splitlines()[0] if text else ""
-        detail = ""
+        detail = f"通道={channel or '无'}"
         if result is None:
-            detail = "站点请求失败"
+            detail += " 站点请求失败"
         elif not result.get("success"):
-            detail = f"站点错误={result.get('error')}"
-        logger.info(
-            f"[dcs_whosin] @bot 自助（{action}）QQ={qq}：{first_line}"
-            + (f"（{detail}）" if detail else "")
-        )
+            detail += f" 站点错误={result.get('error')}"
+        logger.info(f"[dcs_whosin] @bot 自助（{action}）QQ={qq}：{first_line}（{detail}）")
         return text
 
     def _site_targets(self):
