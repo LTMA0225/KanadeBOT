@@ -26,12 +26,13 @@ from urllib.parse import urlsplit
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import Image, Plain
+from astrbot.api.message_components import At, Image, Plain
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.message.message_event_result import MessageChain
 
 # 兼容 AstrBot 不同的插件加载方式：优先相对导入，失败则退回到目录导入
 try:
+    from .dcs_attend import call_bot_action, format_attend_reply
     from .dcs_api import (
         DEFAULT_FALLBACK_IPS,
         DEFAULT_TARGET_URLS,
@@ -68,6 +69,7 @@ except ImportError:  # pragma: no cover - 取决于运行环境
     _plugin_dir = str(Path(__file__).resolve().parent)
     if _plugin_dir not in sys.path:
         sys.path.insert(0, _plugin_dir)
+    from dcs_attend import call_bot_action, format_attend_reply
     from dcs_api import (
         DEFAULT_FALLBACK_IPS,
         DEFAULT_TARGET_URLS,
@@ -165,6 +167,7 @@ class DcsWhosinPlugin(Star):
         self._records_tick_counter = 0
         self._webhook = None  # WebhookReceiver，在 initialize 中创建
         self._mj_task: asyncio.Task | None = None  # /mj 表情预取任务
+        self._attend_last: dict[str, float] = {}  # @bot 自助上机冷却
         self._pricing: dict | None = None
         self._pricing_at = 0.0
         self._pricing_default_logged = False
@@ -445,6 +448,59 @@ class DcsWhosinPlugin(Star):
                 await asyncio.sleep(1)
         if len(urls) > 12:
             yield event.plain_result(f"（收藏共 {len(urls)} 个，仅显示前 12 个）")
+
+    # ------------------------------------------------------------------
+    # 指令：@bot 自助进店 / 离店（按 QQ 绑定自动上号）
+    # ------------------------------------------------------------------
+    @filter.command("进店")
+    async def attend_enter(self, event: AstrMessageEvent):
+        """@机器人 进店 —— 用绑定的会馆账号自动进店"""
+        if not self._policy_allows(event):
+            return
+        if not self.config.get("attend_enable", True):
+            return
+        text = await self._attend_action(event, "enter")
+        if text:
+            yield event.plain_result(text)
+
+    @filter.command("离店")
+    async def attend_leave(self, event: AstrMessageEvent):
+        """@机器人 离店 —— 自动离店并结算"""
+        if not self._policy_allows(event):
+            return
+        if not self.config.get("attend_enable", True):
+            return
+        text = await self._attend_action(event, "leave")
+        if text:
+            yield event.plain_result(text)
+
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
+    async def attend_bare_at(self, event: AstrMessageEvent):
+        """单独 @机器人（不带文字）→ 在店则离店，不在店则进店"""
+        if not self.config.get("attend_enable", True):
+            return
+        if not self.config.get("attend_bare_at", True):
+            return
+        if not self._policy_allows(event):
+            return
+        if event.get_message_str().strip():
+            return  # 带文字的交给指令处理
+        if not self._is_at_bot(event):
+            return
+        text = await self._attend_action(event, "toggle")
+        if text:
+            yield event.plain_result(text)
+
+    @staticmethod
+    def _is_at_bot(event: AstrMessageEvent) -> bool:
+        try:
+            self_id = str(event.get_self_id() or "")
+            for component in event.message_obj.message:
+                if isinstance(component, At) and str(getattr(component, "qq", "")) == self_id:
+                    return True
+            return False
+        except Exception:  # noqa: BLE001
+            return bool(event.is_at_or_wake_command)
 
     # ------------------------------------------------------------------
     # 静默策略：私聊开关 / 群白名单 / 频率限制
@@ -1008,6 +1064,56 @@ class DcsWhosinPlugin(Star):
             raise
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[dcs_whosin] /mj 预取失败：{exc!r}")
+
+    # ------------------------------------------------------------------
+    # @bot 自助上机
+    # ------------------------------------------------------------------
+    async def _attend_action(self, event: AstrMessageEvent, action: str) -> str:
+        qq = str(event.get_sender_id() or "").strip()
+        if not qq.isdigit():
+            return "无法识别你的 QQ 号"
+        now = time.monotonic()
+        cooldown = int(self.config.get("attend_cooldown_seconds", 30) or 0)
+        last = self._attend_last.get(qq, 0.0)
+        if cooldown > 0 and now - last < cooldown:
+            remain = int(cooldown - (now - last)) + 1
+            return f"操作太频繁，请 {remain} 秒后再试"
+        self._attend_last[qq] = now
+        if len(self._attend_last) > 500:
+            cutoff = now - max(cooldown, 60) * 2
+            self._attend_last = {k: v for k, v in self._attend_last.items() if v >= cutoff}
+
+        token = str(self.config.get("webhook_secret", "") or "")
+        if not token:
+            return "机器人还没配置站点令牌，请联系维护者"
+        urls = self.config.get("target_urls", DEFAULT_TARGET_URLS)
+        if isinstance(urls, str):
+            urls = [urls]
+        base = urls[0] if urls else DEFAULT_TARGET_URLS[0]
+        parts = urlsplit(base)
+        action_url = f"{parts.scheme}://{parts.netloc}/api/bot/action"
+        fallback_ips = _as_list(self.config.get("fallback_ips", DEFAULT_FALLBACK_IPS))
+        timeout = int(self.config.get("timeout_seconds", 10) or 10)
+
+        result = None
+        try:
+            result = await call_bot_action([action_url], fallback_ips, timeout, token, action, qq)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[dcs_whosin] @bot 自助操作请求失败：{exc!r}")
+
+        prefix = str(self.config.get("presence_prefix", "【Kanade】") or "")
+        text, meta = format_attend_reply(action, result, prefix)
+        if meta and meta.get("key"):
+            self._ledger_mark(
+                meta.get("key"),
+                e=1 if meta.get("e") else None,
+                x=1 if meta.get("x") else None,
+                at=meta.get("at"),
+            )
+            self._save_presence_state()
+        first_line = text.splitlines()[0] if text else ""
+        logger.info(f"[dcs_whosin] @bot 自助（{action}）QQ={qq}：{first_line}")
+        return text
 
     async def terminate(self):
         """插件被卸载 / 停用时停止后台任务与 Webhook 服务，关闭本地浏览器并清理图片缓存。"""

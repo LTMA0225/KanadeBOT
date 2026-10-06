@@ -224,5 +224,22 @@
     "type": "int",
     "default": 0,
     "hint": "先在群里发 /mjlist 查看编号，再填到这里"
+  },
+  "attend_enable": {
+    "description": "自助上机（@bot 进店 / 离店）",
+    "type": "bool",
+    "default": true,
+    "hint": "需要站点端 /api/bot/action 接口与令牌；只影响发送者自己的账号"
+  },
+  "attend_bare_at": {
+    "description": "单独 @bot（不带文字）自动进店 / 离店",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭后只响应「进店 / 离店」文字指令（@bot 进店、@bot 离店）"
+  },
+  "attend_cooldown_seconds": {
+    "description": "自助上机冷却（秒 / 人）",
+    "type": "int",
+    "default": 30
   }
 }
