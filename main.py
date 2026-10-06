@@ -48,13 +48,16 @@ try:
         fetch_visits_text,
         format_current_rate_message,
         format_fee_yuan,
+        map_role,
         parse_pricing,
         parse_visits_payload,
         parse_whosin_snapshot,
         process_visit_records,
         snapshot_from_users,
+        visit_key,
     )
     from .dcs_render import WhosinRenderer
+    from .dcs_webhook import WebhookReceiver
 except ImportError:  # pragma: no cover - 取决于运行环境
     _plugin_dir = str(Path(__file__).resolve().parent)
     if _plugin_dir not in sys.path:
@@ -75,13 +78,16 @@ except ImportError:  # pragma: no cover - 取决于运行环境
         fetch_visits_text,
         format_current_rate_message,
         format_fee_yuan,
+        map_role,
         parse_pricing,
         parse_visits_payload,
         parse_whosin_snapshot,
         process_visit_records,
         snapshot_from_users,
+        visit_key,
     )
     from dcs_render import WhosinRenderer
+    from dcs_webhook import WebhookReceiver
 
 PLUGIN_NAME = "astrbot_plugin_dcs_whosin"
 
@@ -145,7 +151,7 @@ class DcsWhosinPlugin(Star):
         self._records_state: dict | None = None
         self._records_fail_count = 0
         self._records_tick_counter = 0
-        self._snapshot_recent_exits: dict[str, float] = {}
+        self._webhook = None  # WebhookReceiver，在 initialize 中创建
         self._pricing: dict | None = None
         self._pricing_at = 0.0
         self._pricing_default_logged = False
@@ -176,6 +182,17 @@ class DcsWhosinPlugin(Star):
         if self._presence_task is None or self._presence_task.done():
             self._presence_task = asyncio.create_task(self._presence_loop())
             logger.info("[dcs_whosin] 进离店播报任务已启动。")
+        if self._webhook is None:
+            self._webhook = WebhookReceiver(
+                str(self.config.get("webhook_bind", "0.0.0.0") or "0.0.0.0"),
+                int(self.config.get("webhook_port", 8765) or 8765),
+                str(self.config.get("webhook_secret", "") or ""),
+                self._on_webhook_event,
+            )
+        if self.config.get("webhook_enable", False):
+            await self._webhook.start()
+        else:
+            logger.info("[dcs_whosin] Webhook 接收服务未启用（webhook_enable=false）")
         if self._status_task and not self._status_task.done():
             return
         self._status_task = asyncio.create_task(self._status_loop())
@@ -479,19 +496,33 @@ class DcsWhosinPlugin(Star):
         return self.plugin_data_dir / "presence_state.json"
 
     def _load_presence_state(self) -> None:
-        """插件启动时恢复进/离店状态（记录流去重表 或 在店快照）。"""
+        """插件启动时恢复进/离店状态（统一去重表 + 在店快照）。"""
         try:
             path = self._presence_state_file()
             if not path.exists():
                 return
             data = json.loads(path.read_text(encoding="utf-8"))
             saved_at = float(data.get("saved_at") or 0)
+            seen = data.get("seen")
+            if isinstance(seen, dict):
+                self._records_state = {"seen": seen}
+            # 兼容旧版本：把 recent_exits 迁移为统一去重表的离店标记
+            legacy_exits = data.get("recent_exits")
+            if isinstance(legacy_exits, dict):
+                ledger = self._ledger_seen()
+                for k, v in legacy_exits.items():
+                    rec = ledger.get(str(k)) if isinstance(ledger.get(str(k)), dict) else {}
+                    rec["x"] = 1
+                    rec.setdefault("e", 1)
+                    try:
+                        rec["at"] = int(float(v))
+                    except (TypeError, ValueError):
+                        pass
+                    ledger[str(k)] = rec
             if str(data.get("mode") or "snapshot") == "records":
-                seen = data.get("seen")
                 if isinstance(seen, dict):
-                    self._records_state = {"seen": seen}
                     self._presence_mode = "records"
-                    logger.info(f"[dcs_whosin] 已恢复访客记录去重状态（{len(seen)} 条）")
+                    logger.info(f"[dcs_whosin] 已恢复进离店去重状态（{len(seen)} 条）")
                 return
             ttl_minutes = int(self.config.get("presence_state_ttl_minutes", 15) or 0)
             users = data.get("users")
@@ -505,11 +536,6 @@ class DcsWhosinPlugin(Star):
                 self._presence_ready = True
                 age_min = max(0, int((time.time() - saved_at) / 60))
                 logger.info(f"[dcs_whosin] 已恢复进离店快照（{len(self._presence)} 人，约 {age_min} 分钟前）")
-            exits = data.get("recent_exits")
-            if isinstance(exits, dict):
-                self._snapshot_recent_exits = {
-                    str(k): float(v) for k, v in exits.items() if isinstance(v, (int, float))
-                }
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[dcs_whosin] 进离店状态恢复失败：{exc!r}")
 
@@ -518,19 +544,13 @@ class DcsWhosinPlugin(Star):
             self.plugin_data_dir.mkdir(parents=True, exist_ok=True)
             path = self._presence_state_file()
             temp = path.with_suffix(".tmp")
-            if self._presence_mode == "records":
-                payload = {
-                    "mode": "records",
-                    "saved_at": time.time(),
-                    "seen": (self._records_state or {}).get("seen") or {},
-                }
-            else:
-                payload = {
-                    "mode": "snapshot",
-                    "saved_at": time.time(),
-                    "users": self._presence,
-                    "recent_exits": self._snapshot_recent_exits,
-                }
+            payload = {
+                "mode": self._presence_mode,
+                "saved_at": time.time(),
+                "seen": self._ledger_seen(),
+            }
+            if self._presence_mode != "records":
+                payload["users"] = self._presence
             temp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
             temp.replace(path)
         except Exception as exc:  # noqa: BLE001
@@ -606,10 +626,10 @@ class DcsWhosinPlugin(Star):
                 )
             return False
         self._records_fail_count = 0
-        if self._records_state is None or self._presence_mode != "records":
-            self._records_state = self._seed_records_state(visits)
+        if self._presence_mode != "records":
             self._presence_mode = "records"
             logger.info("[dcs_whosin] 已启用访问记录模式（进离店无盲区，扣费为站点实际结算金额）")
+        self._ledger_seen()  # 确保统一去重表已初始化
         now_ms = int(time.time() * 1000)
         fresh_minutes = int(self.config.get("presence_record_fresh_minutes", 10) or 10)
         prefix = str(self.config.get("presence_prefix", "【Kanade】") or "")
@@ -622,30 +642,109 @@ class DcsWhosinPlugin(Star):
         await self._broadcast_presence(messages)
         return True
 
-    def _seed_records_state(self, visits: list[dict]) -> dict:
-        """从当前快照状态播种记录流去重表，模式切换时不重复播报。"""
-        present_keys: set[str] = set()
-        if self._presence_ready:
-            for user in self._presence.values():
-                uid = user.get("id")
-                entered = user.get("entered_ms")
-                if uid is not None and entered:
-                    present_keys.add(f"{uid}:{int(entered)}")
-        seen: dict[str, dict] = {}
-        for visit in visits:
-            key = f"{visit.get('user_id')}:{int(visit.get('entered_ms') or 0)}"
-            seen[str(visit.get("id"))] = {
-                "e": 1 if key in present_keys else 0,
-                "x": 1 if key in self._snapshot_recent_exits else 0,
-                "at": int(visit.get("entered_ms") or 0),
-            }
-        return {"seen": seen}
+    def _ledger_seen(self) -> dict:
+        """统一去重表：{"用户ID:进店毫秒": {"e": 进店已播, "x": 离店已播, "at": 进店时间}}。
 
-    def _prune_recent_exits(self, now_ms: int) -> None:
-        keep = 2 * 3600 * 1000
-        self._snapshot_recent_exits = {
-            k: v for k, v in self._snapshot_recent_exits.items() if now_ms - v <= keep
-        }
+        Webhook、访问记录流与在店快照三种通道共用，确保任何事件只播报一次。
+        """
+        if self._records_state is None:
+            self._records_state = {"seen": {}}
+        seen = self._records_state.get("seen")
+        if not isinstance(seen, dict):
+            seen = {}
+            self._records_state["seen"] = seen
+        return seen
+
+    def _ledger_get(self, key) -> dict:
+        if not key:
+            return {}
+        record = self._ledger_seen().get(key)
+        return record if isinstance(record, dict) else {}
+
+    def _ledger_mark(self, key, e=None, x=None, at=None) -> None:
+        if not key:
+            return
+        seen = self._ledger_seen()
+        record = seen.get(key) if isinstance(seen.get(key), dict) else {}
+        if e is not None:
+            record["e"] = 1 if e else 0
+        if x is not None:
+            record["x"] = 1 if x else 0
+        if at is not None:
+            try:
+                record["at"] = int(at)
+            except (TypeError, ValueError):
+                pass
+        seen[key] = record
+
+    async def _on_webhook_event(self, payload: dict) -> None:
+        """处理站点 webhook 事件：进店/离店实时播报（与轮询通道共用统一去重表）。"""
+        if not self.config.get("presence_notify_enable", False):
+            return
+        event = str(payload.get("event") or "").strip().lower()
+        if event not in ("enter", "leave"):
+            return
+        name = str(payload.get("nickname") or "").strip()
+        role = map_role(payload.get("role"))
+        uid = payload.get("userId")
+        entered = payload.get("enteredAt")
+        if not name or role != "player" or uid is None or entered is None:
+            return
+        try:
+            entered_ms = int(entered)
+        except (TypeError, ValueError):
+            return
+
+        key = visit_key(uid, entered_ms)
+        now_ms = int(time.time() * 1000)
+        fresh_minutes = int(self.config.get("presence_record_fresh_minutes", 10) or 10)
+        fresh_ms = max(1, fresh_minutes) * 60000
+        prefix = str(self.config.get("presence_prefix", "【Kanade】") or "")
+        record = self._ledger_get(key)
+        messages: list[str] = []
+
+        if event == "enter":
+            if not record.get("e"):
+                if now_ms - entered_ms <= fresh_ms:
+                    messages.append(f"{prefix}{name}进店了")
+                self._ledger_mark(key, e=1, at=entered_ms)
+        else:
+            left = payload.get("leftAt")
+            try:
+                left_ms = int(left) if left is not None else now_ms
+            except (TypeError, ValueError):
+                left_ms = now_ms
+            if not record.get("e"):
+                if now_ms - entered_ms <= fresh_ms:
+                    messages.append(f"{prefix}{name}进店了")
+            if not record.get("x"):
+                if now_ms - left_ms <= fresh_ms:
+                    charge = payload.get("charge")
+                    if charge is None:
+                        try:
+                            multiplier = float(payload.get("chargeMultiplier")) if payload.get("chargeMultiplier") is not None else 1.0
+                        except (TypeError, ValueError):
+                            multiplier = 1.0
+                        try:
+                            pass_multiplier = float(payload.get("passMultiplier")) if payload.get("passMultiplier") is not None else 1.0
+                        except (TypeError, ValueError):
+                            pass_multiplier = 1.0
+                        pricing = await self._get_pricing("")
+                        charge = calculate_charge_fen(
+                            entered_ms, left_ms, pricing, abs(multiplier) * abs(pass_multiplier)
+                        )
+                    minutes = max(0, math.ceil((left_ms - entered_ms) / 60000))
+                    messages.append(
+                        f"{prefix}{name}离店了\n"
+                        f"游玩{minutes}分钟\n"
+                        f"扣费{format_fee_yuan(charge or 0)}元（线上余额）"
+                    )
+            self._ledger_mark(key, e=1, x=1, at=entered_ms)
+
+        self._save_presence_state()
+        if messages:
+            logger.info(f"[dcs_whosin] Webhook({event}) 已播报 {name}")
+        await self._broadcast_presence(messages)
 
     async def _presence_tick_snapshot(self, interval: int) -> None:
         result = await self._fetch_data()
@@ -678,12 +777,21 @@ class DcsWhosinPlugin(Star):
         prefix = str(self.config.get("presence_prefix", "【Kanade】") or "")
         messages: list[str] = []
         for user in entries:
+            key = visit_key(user.get("id"), user.get("entered_ms"))
+            record = self._ledger_get(key)
+            if record.get("e"):
+                continue  # Webhook / 记录流已播报过进店
             messages.append(f"{prefix}{user.get('name', '')}进店了")
+            self._ledger_mark(key, e=1, at=user.get("entered_ms"))
         for user in exits:
             entered_ms = user.get("entered_ms")
             if not entered_ms:
                 logger.warning(f"[dcs_whosin] {user.get('name', '')} 离店但缺少入店时间，跳过播报")
                 continue
+            key = visit_key(user.get("id"), entered_ms)
+            record = self._ledger_get(key)
+            if record.get("x"):
+                continue  # Webhook / 记录流已播报过离店
             last_seen = int(user.get("last_seen_ms") or now_ms)
             gap = max(0, now_ms - last_seen)
             # 真实离店发生在（最后在店, 本次发现]之间，取中点降低误差
@@ -701,10 +809,7 @@ class DcsWhosinPlugin(Star):
                 f"游玩{minutes}分钟\n"
                 f"扣费{format_fee_yuan(fee_fen)}元（线上余额）"
             )
-            uid = user.get("id")
-            if uid is not None and entered_ms:
-                self._snapshot_recent_exits[f"{uid}:{int(entered_ms)}"] = now_ms
-                self._prune_recent_exits(now_ms)
+            self._ledger_mark(key, e=1, x=1, at=int(entered_ms))
 
         self._presence = current
         self._save_presence_state()
@@ -780,7 +885,9 @@ class DcsWhosinPlugin(Star):
         return self._pricing
 
     async def terminate(self):
-        """插件被卸载 / 停用时停止后台任务，关闭本地浏览器并清理图片缓存。"""
+        """插件被卸载 / 停用时停止后台任务与 Webhook 服务，关闭本地浏览器并清理图片缓存。"""
+        if self._webhook is not None:
+            await self._webhook.stop()
         for task in (self._status_task, self._deps_task, self._presence_task):
             if task and not task.done():
                 task.cancel()

@@ -188,5 +188,29 @@
     "type": "int",
     "default": 10,
     "hint": "更早的记录只做去重不再播报，避免机器人重启后补发大量旧消息"
+  },
+  "webhook_enable": {
+    "description": "Webhook 接收服务（站点实时推送进/离店事件）",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后监听端口接收站点推送；站点无法直连时自动回退记录流/快照模式，不会漏报"
+  },
+  "webhook_bind": {
+    "description": "Webhook 监听地址",
+    "type": "string",
+    "default": "0.0.0.0",
+    "hint": "端口映射/隧道场景用 0.0.0.0；只允许本机访问用 127.0.0.1"
+  },
+  "webhook_port": {
+    "description": "Webhook 监听端口",
+    "type": "int",
+    "default": 8765
+  },
+  "webhook_secret": {
+    "description": "Webhook 令牌（与站点 .env 的 DCS_WEBHOOK_TOKEN 一致）",
+    "type": "string",
+    "default": "",
+    "secret": true,
+    "hint": "留空 = 不校验令牌（不建议）；设置后校验请求头 X-DCS-Token"
   }
 }

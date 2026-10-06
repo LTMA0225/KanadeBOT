@@ -375,6 +375,24 @@ def parse_visits_payload(text: str) -> Optional[List[Dict[str, Any]]]:
     return visits
 
 
+def map_role(raw: Any) -> str:
+    """站点角色字符串（CUSTOMER/STAFF/ADMIN）-> 插件内部角色。"""
+    return _ROLE_MAP.get(str(raw or "CUSTOMER"), "player")
+
+
+def visit_key(user_id: Any, entered_ms: Any) -> Optional[str]:
+    """进/离店去重键：同一用户 + 同一进店时间（毫秒）唯一标识一次访问。
+
+    Webhook、访问记录流与在店快照三种通道共用该键做统一去重。
+    """
+    try:
+        if user_id is None or entered_ms is None:
+            return None
+        return f"{int(user_id)}:{int(entered_ms)}"
+    except (TypeError, ValueError):
+        return None
+
+
 def process_visit_records(
     state: Dict[str, Any],
     visits: List[Dict[str, Any]],
@@ -400,10 +418,10 @@ def process_visit_records(
     messages: List[str] = []
 
     for visit in sorted(visits, key=lambda item: int(item.get("entered_ms") or 0)):
-        vid = str(visit.get("id"))
         name = str(visit.get("name") or "")
         entered = int(visit.get("entered_ms") or 0)
         left = visit.get("left_ms")
+        vid = visit_key(visit.get("user_id"), entered) or f"name:{name}"
         record = seen.get(vid) or {}
         entry_done = bool(record.get("e"))
         exit_done = bool(record.get("x"))
