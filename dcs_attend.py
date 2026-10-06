@@ -1,7 +1,8 @@
-"""直流会馆 · @bot 自助进店/离店支持模块（v2.5.0）。
+"""直流会馆 · @bot 自助离店支持模块（v2.5.1）。
 
-玩家在群里 @ 机器人（或发"进店"/"离店"）时，机器人用发送者的 QQ 号调用
-站点 /api/bot/action 接口：站点按 QQ 绑定（User.qqid）找到账号，代为进店/离店。
+玩家在群里发 "@机器人 离店"（或 /离店）时，机器人用发送者的 QQ 号调用
+站点 /api/bot/action 接口：站点按 QQ 绑定（User.qqid）找到账号，代为离店结算。
+出于风险控制（避免"人未到店就被远程进店"），该功能只支持离店，不支持进店。
 令牌与 webhook 共用（请求头 X-DCS-Token = 站点 .env 的 DCS_WEBHOOK_TOKEN）。
 
 本模块不依赖 astrbot；format_attend_reply 为纯函数，便于离线测试。
@@ -64,51 +65,42 @@ def format_attend_reply(
 ) -> Tuple[str, Optional[Dict[str, Any]]]:
     """把站点返回整理成 (回复文本, 记账信息)。
 
-    记账信息 {"key","e","x","at"} 用于把该次进/离店写入统一去重表，
+    仅支持离店（leave）。记账信息 {"key","e","x","at"} 用于把该次离店写入统一去重表，
     避免播报通道（Webhook/记录流/快照）再重复播报一次。
     """
     if result is None:
         return "连接会馆网站失败，请稍后再试", None
 
-    if result.get("success"):
-        done = str(result.get("action") or action or "")
+    if result.get("success") and str(result.get("action") or action) == "leave":
         name = str(result.get("nickname") or "")
         entered = result.get("enteredAt")
+        left = result.get("leftAt")
         key = visit_key(result.get("userId"), entered)
-        if done == "leave":
-            left = result.get("leftAt")
-            try:
-                left_ms = int(left) if left is not None else int(time.time() * 1000)
-            except (TypeError, ValueError):
-                left_ms = int(time.time() * 1000)
-            try:
-                minutes = max(0, math.ceil((left_ms - int(entered)) / 60000))
-            except (TypeError, ValueError):
-                minutes = 0
-            charge = result.get("charge")
-            meta = {"key": key, "e": 1, "x": 1, "at": entered}
-            text = (
-                f"{prefix}{name}离店了\n"
-                f"游玩{minutes}分钟\n"
-                f"扣费{format_fee_yuan(charge or 0)}元（线上余额）"
-            )
-            return text, meta
-        meta = {"key": key, "e": 1, "x": 0, "at": entered}
-        return f"{prefix}{name}进店了", meta
+        try:
+            left_ms = int(left) if left is not None else int(time.time() * 1000)
+        except (TypeError, ValueError):
+            left_ms = int(time.time() * 1000)
+        try:
+            minutes = max(0, math.ceil((left_ms - int(entered)) / 60000))
+        except (TypeError, ValueError):
+            minutes = 0
+        charge = result.get("charge")
+        meta = {"key": key, "e": 1, "x": 1, "at": entered}
+        text = (
+            f"{prefix}{name}离店了\n"
+            f"游玩{minutes}分钟\n"
+            f"扣费{format_fee_yuan(charge or 0)}元（线上余额）"
+        )
+        return text, meta
+
+    if result.get("success"):
+        return "操作失败，请稍后再试", None
 
     error = str(result.get("error") or "")
     if error == "NOT_BOUND":
         return "这个 QQ 还没绑定会馆账号：打开会馆网站 →「管理页」→「QQ绑定」完成绑定后再试", None
-    if error == "ALREADY_IN":
-        return "你已经在店里啦～", None
     if error == "NOT_IN":
         return "你现在不在店里哦", None
-    if error == "LOW_BALANCE":
-        try:
-            admission = int(result.get("admissionBalance") or 1000) / 100
-        except (TypeError, ValueError):
-            admission = 10.0
-        return f"余额不足：进店至少需要 ¥{admission:.2f}，请先到网站充值", None
     if error == "UNAUTHORIZED":
         return "机器人令牌配置有误，请让维护者检查", None
     if error == "BAD_QQ":

@@ -26,7 +26,7 @@ from urllib.parse import urlsplit
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import At, Image, Plain
+from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.message.message_event_result import MessageChain
 
@@ -450,19 +450,9 @@ class DcsWhosinPlugin(Star):
             yield event.plain_result(f"（收藏共 {len(urls)} 个，仅显示前 12 个）")
 
     # ------------------------------------------------------------------
-    # 指令：@bot 自助进店 / 离店（按 QQ 绑定自动上号）
+    # 指令：@bot 自助离店（按 QQ 绑定自动结算）
+    # 说明：为避免"人未到店就被远程进店"的风险，不支持机器人进店（进店请在网站操作）。
     # ------------------------------------------------------------------
-    @filter.command("进店")
-    async def attend_enter(self, event: AstrMessageEvent):
-        """@机器人 进店 —— 用绑定的会馆账号自动进店"""
-        if not self._policy_allows(event):
-            return
-        if not self.config.get("attend_enable", True):
-            return
-        text = await self._attend_action(event, "enter")
-        if text:
-            yield event.plain_result(text)
-
     @filter.command("离店")
     async def attend_leave(self, event: AstrMessageEvent):
         """@机器人 离店 —— 自动离店并结算"""
@@ -473,34 +463,6 @@ class DcsWhosinPlugin(Star):
         text = await self._attend_action(event, "leave")
         if text:
             yield event.plain_result(text)
-
-    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
-    async def attend_bare_at(self, event: AstrMessageEvent):
-        """单独 @机器人（不带文字）→ 在店则离店，不在店则进店"""
-        if not self.config.get("attend_enable", True):
-            return
-        if not self.config.get("attend_bare_at", True):
-            return
-        if not self._policy_allows(event):
-            return
-        if event.get_message_str().strip():
-            return  # 带文字的交给指令处理
-        if not self._is_at_bot(event):
-            return
-        text = await self._attend_action(event, "toggle")
-        if text:
-            yield event.plain_result(text)
-
-    @staticmethod
-    def _is_at_bot(event: AstrMessageEvent) -> bool:
-        try:
-            self_id = str(event.get_self_id() or "")
-            for component in event.message_obj.message:
-                if isinstance(component, At) and str(getattr(component, "qq", "")) == self_id:
-                    return True
-            return False
-        except Exception:  # noqa: BLE001
-            return bool(event.is_at_or_wake_command)
 
     # ------------------------------------------------------------------
     # 静默策略：私聊开关 / 群白名单 / 频率限制
