@@ -1,4 +1,4 @@
-# 直流会馆 QQ 机器人：AstrBot + NapCat Docker 编排（服务器部署用；Windows 桌面请用迁移包里的一键部署）
+# 音游窝 QQ 机器人：AstrBot + NapCat Docker 编排（服务器部署用；Windows 桌面请用迁移包里的一键部署）
 # 使用方法：
 #   1. 在本目录执行 docker compose up -d --build
 #   2. 首次启动后：NapCat WebUI（http://127.0.0.1:6099）扫码登录机器人 QQ

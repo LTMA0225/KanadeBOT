@@ -1,10 +1,10 @@
-"""直流会馆 QQ 查询机器人插件（AstrBot）。
+"""音游窝 QQ 查询机器人插件（AstrBot）。
 
 提供以下群聊指令：
-- j     查询"直流会馆"店内实时在店人员，以图片 + 文本形式发送（同人同群有冷却）。
+- j     查询"音游窝"店内实时在店人员，以图片 + 文本形式发送（同人同群有冷却）。
 - 25h   娱乐指令，回复 25時、ナイトコードで（不设冷却）。
 
-数据来源为直流会馆官网 /whosin 页面，账号密码与 Cookie 只经 HTTPS 发送；
+数据来源为音游窝官网 /whosin 页面，账号密码与 Cookie 只经 HTTPS 发送；
 图片在本机渲染：Jinja2（自动转义）生成 HTML，Playwright 驱动本机浏览器内核截图，
 不调用任何第三方渲染服务。
 """
@@ -158,7 +158,7 @@ def _detect_adapter_patch() -> bool | None:
 
 
 class DcsWhosinPlugin(Star):
-    """直流会馆查询机器人插件主类。"""
+    """音游窝查询机器人插件主类。"""
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -348,7 +348,7 @@ class DcsWhosinPlugin(Star):
     # ------------------------------------------------------------------
     @filter.command("j")
     async def query_whosin(self, event: AstrMessageEvent):
-        """查询直流会馆店内实时人员，以图片 + 文本形式发送"""
+        """查询音游窝店内实时人员，以图片 + 文本形式发送"""
         if not self._policy_allows(event):
             return
 
