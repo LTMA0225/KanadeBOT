@@ -5,7 +5,7 @@
     POST /webhook   接收事件（建议配置 webhook_secret，校验请求头 X-DCS-Token）
     GET  /health    健康检查
 
-站点侧（dcs-web）在 .env 配置示例：
+音游窝网页端（github.com/MioAoi/dcs-web）在 .env 配置示例：
     DCS_WEBHOOK_URLS=http://<本机地址>:8765/webhook
     DCS_WEBHOOK_TOKEN=<与插件 webhook_secret 相同的令牌>
 

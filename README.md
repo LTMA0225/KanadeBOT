@@ -7,6 +7,7 @@
 
 - 机器人框架：AstrBot ≥ 4.13（生产环境使用 4.28.1 桌面版）
 - QQ 协议端：NapCat（OneBot v11，反向 WebSocket）
+- 配套网页端：[MioAoi/dcs-web](https://github.com/MioAoi/dcs-web)（音游窝网站，本机器人对接的业务系统）
 - 开发语言：Python 3.10+
 - 图片：**本机渲染**——Jinja2 生成 HTML，Playwright 驱动本机浏览器内核截图
   （Windows 默认用系统自带的 Edge）；风格为**宵崎奏主题 + 萌感字体（站酷快乐体）**，
@@ -280,7 +281,7 @@ docker compose up -d --build
 
 ## 灵感与素材来源
 
-- 业务数据与视觉资产来自「音游窝」项目（dc-web）；
+- 业务数据与视觉资产来自音游窝网页端 [MioAoi/dcs-web](https://github.com/MioAoi/dcs-web)；
 - 字体：站酷快乐体（ZCOOL KuaiLe），SIL Open Font License 1.1，见 `assets/fonts/OFL.txt`；
 - 插件开发遵循 [AstrBot 官方插件开发文档](https://docs.astrbot.app/dev/star/plugin-new.html)，
   Skill 采用 [Anthropic Skills](https://code.claude.com/docs/zh-CN/skills) 规范。

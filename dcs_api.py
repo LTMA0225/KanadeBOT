@@ -472,7 +472,7 @@ async def site_login(
 ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """调用站点登录接口，返回 (Cookie, 错误类别, 错误详情)。
 
-    站点接口约定（见 dcs-web 源码 app/api/login/route.ts）：
+    站点接口约定（见音游窝网页端 github.com/MioAoi/dcs-web 的源码 app/api/login/route.ts）：
     - POST {origin}/api/login，JSON 参数 {"username": ..., "password": ...}
     - 成功：200 且响应体 {"success": true}，并通过 Set-Cookie 下发 session
 
