@@ -146,6 +146,7 @@ def parse_whosin_snapshot(html: str) -> Optional[List[Dict[str, Any]]]:
             "entered_ms": entered,
             "multiplier": obj.get("chargeMultiplier"),
             "balance": obj.get("balance"),
+            "qqid": str(obj.get("qqid") or "").strip(),
         }
     if not users:
         return None
@@ -168,6 +169,7 @@ def snapshot_from_users(users: Any) -> List[Dict[str, Any]]:
             "entered_ms": entered,
             "multiplier": 1.0,
             "balance": None,
+            "qqid": "",
         })
     return result
 

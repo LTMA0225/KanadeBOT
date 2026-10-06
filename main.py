@@ -32,7 +32,12 @@ from astrbot.core.message.message_event_result import MessageChain
 
 # 兼容 AstrBot 不同的插件加载方式：优先相对导入，失败则退回到目录导入
 try:
-    from .dcs_attend import call_bot_action, format_attend_reply
+    from .dcs_attend import (
+        call_bot_action,
+        call_force_leave,
+        fetch_latest_charge_fen,
+        format_attend_reply,
+    )
     from .dcs_api import (
         DEFAULT_FALLBACK_IPS,
         DEFAULT_TARGET_URLS,
@@ -69,7 +74,12 @@ except ImportError:  # pragma: no cover - 取决于运行环境
     _plugin_dir = str(Path(__file__).resolve().parent)
     if _plugin_dir not in sys.path:
         sys.path.insert(0, _plugin_dir)
-    from dcs_attend import call_bot_action, format_attend_reply
+    from dcs_attend import (
+        call_bot_action,
+        call_force_leave,
+        fetch_latest_charge_fen,
+        format_attend_reply,
+    )
     from dcs_api import (
         DEFAULT_FALLBACK_IPS,
         DEFAULT_TARGET_URLS,
@@ -1045,25 +1055,30 @@ class DcsWhosinPlugin(Star):
             cutoff = now - max(cooldown, 60) * 2
             self._attend_last = {k: v for k, v in self._attend_last.items() if v >= cutoff}
 
-        token = str(self.config.get("webhook_secret", "") or "")
-        if not token:
-            return "机器人还没配置站点令牌，请联系维护者"
-        urls = self.config.get("target_urls", DEFAULT_TARGET_URLS)
-        if isinstance(urls, str):
-            urls = [urls]
-        base = urls[0] if urls else DEFAULT_TARGET_URLS[0]
-        parts = urlsplit(base)
-        action_url = f"{parts.scheme}://{parts.netloc}/api/bot/action"
-        fallback_ips = _as_list(self.config.get("fallback_ips", DEFAULT_FALLBACK_IPS))
-        timeout = int(self.config.get("timeout_seconds", 10) or 10)
-
-        result = None
-        try:
-            result = await call_bot_action([action_url], fallback_ips, timeout, token, action, qq)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(f"[dcs_whosin] @bot 自助操作请求失败：{exc!r}")
-
         prefix = str(self.config.get("presence_prefix", "【Kanade】") or "")
+        result = None
+        # 通道一（无需站点更新）：在店快照按 QQ 绑定找账号 → 工作人员代离店接口
+        try:
+            result = await self._attend_leave_via_snapshot(qq)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[dcs_whosin] @bot 自助离店（快照通道）异常：{exc!r}")
+        # 通道二（站点部署机器人接口后可用，错误提示更精确）：/api/bot/action
+        if result is None or str(result.get("error") or "") == "NOT_FOUND":
+            try:
+                api_result = await self._attend_leave_via_api(qq)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[dcs_whosin] @bot 自助离店（接口通道）异常：{exc!r}")
+                api_result = None
+            if isinstance(api_result, dict):
+                api_error = str(api_result.get("error") or "")
+                if api_result.get("success") or api_error in (
+                    "NOT_BOUND",
+                    "NOT_IN",
+                    "UNAUTHORIZED",
+                    "NO_TOKEN",
+                ):
+                    result = api_result
+
         text, meta = format_attend_reply(action, result, prefix)
         if meta and meta.get("key"):
             self._ledger_mark(
@@ -1074,8 +1089,98 @@ class DcsWhosinPlugin(Star):
             )
             self._save_presence_state()
         first_line = text.splitlines()[0] if text else ""
-        logger.info(f"[dcs_whosin] @bot 自助（{action}）QQ={qq}：{first_line}")
+        detail = ""
+        if result is None:
+            detail = "站点请求失败"
+        elif not result.get("success"):
+            detail = f"站点错误={result.get('error')}"
+        logger.info(
+            f"[dcs_whosin] @bot 自助（{action}）QQ={qq}：{first_line}"
+            + (f"（{detail}）" if detail else "")
+        )
         return text
+
+    def _site_targets(self):
+        urls = self.config.get("target_urls", DEFAULT_TARGET_URLS)
+        if isinstance(urls, str):
+            urls = [urls]
+        fallback_ips = _as_list(self.config.get("fallback_ips", DEFAULT_FALLBACK_IPS))
+        timeout = int(self.config.get("timeout_seconds", 10) or 10)
+        cookie = str(self.config.get("cookie", "") or "")
+        username = str(self.config.get("login_username", "") or "")
+        password = str(self.config.get("login_password", "") or "")
+        return urls, fallback_ips, timeout, cookie, username, password
+
+    @staticmethod
+    def _find_snapshot_user(snapshot, qq: str):
+        for user in snapshot or []:
+            if str(user.get("qqid") or "").strip() == qq:
+                return user
+        return None
+
+    async def _attend_leave_via_snapshot(self, qq: str) -> dict | None:
+        """通道一：/whosin 快照按 QQ 绑定找账号 → 工作人员代离店 → 取真实扣费。"""
+        snapshot = None
+        now_ms = int(time.time() * 1000)
+        if self._presence_ready and self._presence:
+            newest = max((int(u.get("last_seen_ms") or 0) for u in self._presence.values()), default=0)
+            if now_ms - newest <= 40000:
+                snapshot = list(self._presence.values())
+        match = self._find_snapshot_user(snapshot, qq)
+        if match is None:
+            # 内存快照里没有（可能刚进店 / 快照太旧 / 状态文件来自旧版本）：现场抓一次
+            fetched = await self._fetch_data()
+            if fetched.error or not fetched.raw_html:
+                return None
+            snapshot = parse_whosin_snapshot(fetched.raw_html)
+            if snapshot is None:
+                snapshot = snapshot_from_users(fetched.users)
+            match = self._find_snapshot_user(snapshot, qq)
+        if match is None or match.get("id") is None or not match.get("entered_ms"):
+            return {"success": False, "error": "NOT_FOUND"}
+
+        user_id = int(match["id"])
+        entered_ms = int(match["entered_ms"])
+        urls, fallback_ips, timeout, cookie, username, password = self._site_targets()
+        resp = await call_force_leave(urls, fallback_ips, timeout, cookie, username, password, user_id)
+        if resp is None:
+            return None
+        if not resp.get("success"):
+            error = str(resp.get("error") or "")
+            if error.startswith("HTTP_401") or error.startswith("HTTP_403"):
+                logger.warning("[dcs_whosin] 代离店被站点拒绝（机器人账号权限异常）")
+                return {"success": False, "error": "UNAUTHORIZED"}
+            return {"success": False, "error": error or "FORCE_FAILED"}
+
+        left_ms = int(time.time() * 1000)
+        charge = await fetch_latest_charge_fen(urls, fallback_ips, timeout, cookie, username, password, user_id)
+        if charge is None:
+            pricing = await self._get_pricing("")
+            try:
+                multiplier = float(match.get("multiplier")) if match.get("multiplier") is not None else 1.0
+            except (TypeError, ValueError):
+                multiplier = 1.0
+            charge = calculate_charge_fen(entered_ms, left_ms, pricing, multiplier)
+        return {
+            "success": True,
+            "action": "leave",
+            "userId": user_id,
+            "nickname": match.get("name") or "",
+            "enteredAt": entered_ms,
+            "leftAt": left_ms,
+            "charge": charge,
+        }
+
+    async def _attend_leave_via_api(self, qq: str) -> dict | None:
+        """通道二：调用站点 /api/bot/action（需站点已部署该接口）。"""
+        token = str(self.config.get("webhook_secret", "") or "")
+        if not token:
+            return {"success": False, "error": "NO_TOKEN"}
+        urls, fallback_ips, timeout, _c, _u, _p = self._site_targets()
+        base = urls[0] if urls else DEFAULT_TARGET_URLS[0]
+        parts = urlsplit(base)
+        action_url = f"{parts.scheme}://{parts.netloc}/api/bot/action"
+        return await call_bot_action([action_url], fallback_ips, timeout, token, "leave", qq)
 
     async def terminate(self):
         """插件被卸载 / 停用时停止后台任务与 Webhook 服务，关闭本地浏览器并清理图片缓存。"""

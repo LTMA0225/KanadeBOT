@@ -1,16 +1,22 @@
-"""直流会馆 · @bot 自助离店支持模块（v2.5.1）。
+"""直流会馆 · @bot 自助离店支持模块（v2.6.0）。
 
-玩家在群里发 "@机器人 离店"（或 /离店）时，机器人用发送者的 QQ 号调用
-站点 /api/bot/action 接口：站点按 QQ 绑定（User.qqid）找到账号，代为离店结算。
-出于风险控制（避免"人未到店就被远程进店"），该功能只支持离店，不支持进店。
-令牌与 webhook 共用（请求头 X-DCS-Token = 站点 .env 的 DCS_WEBHOOK_TOKEN）。
+玩家在群里发 "@机器人 离店" 时，机器人用发送者的 QQ 号完成自助离店，**纯机器人实现、无需站点更新**：
 
-本模块不依赖 astrbot；format_attend_reply 为纯函数，便于离线测试。
+- 通道一（默认立即可用）：读取 /whosin 数据中的 QQ 绑定（qqid）找到账号，
+  调用站点已有的工作人员接口 /api/forceleave 代为离店结算（机器人账号有工作人员权限）；
+  离店后从来店记录页读取**真实扣费金额**。
+- 通道二（站点部署机器人接口后自动启用，作为兜底与更精确的错误提示）：/api/bot/action。
+
+出于风险控制，只支持离店，不支持机器人进店。
+令牌与 webhook 共用（通道二使用，请求头 X-DCS-Token = 站点 .env 的 DCS_WEBHOOK_TOKEN）。
+本模块不依赖 astrbot；格式化与解析函数为纯函数，便于离线测试。
 """
 
 from __future__ import annotations
 
+import json
 import math
+import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -51,10 +57,133 @@ async def call_bot_action(
                     json={"action": action, "qq": qq},
                     headers={"User-Agent": api.USER_AGENT, "X-DCS-Token": token},
                 ) as resp:
-                    data = await resp.json(content_type=None)
+                    body_text = await resp.text()
+                    try:
+                        data = json.loads(body_text) if body_text else None
+                    except Exception:  # noqa: BLE001 - 非 JSON（如 404 页面）
+                        data = None
                     if isinstance(data, dict):
                         return data
                     return {"success": False, "error": f"HTTP_{resp.status}"}
+        except Exception:  # noqa: BLE001 - 换下一条线路
+            continue
+    return None
+
+
+_VISIT_ROW = re.compile(
+    r'<div class="visitListing">\s*<p>([^<]*)</p>\s*<p>([^<]*)</p>\s*<p>([^<]*)</p>',
+    re.S,
+)
+
+
+def money_text_to_fen(text: str) -> Optional[int]:
+    """把站点金额文案（¥15.75 / ¥1.5万 / −¥3.00）转成分；无金额返回 None。"""
+    raw = str(text or "").strip()
+    if not raw or raw in ("-", "—"):
+        return None
+    negative = raw.startswith("−") or raw.startswith("-")
+    cleaned = raw.replace("¥", "").replace("￥", "").replace("−", "").replace("-", "").strip()
+    try:
+        if cleaned.endswith("万"):
+            value = int(round(float(cleaned[:-1]) * 1_000_000))
+        else:
+            value = int(round(float(cleaned) * 100))
+    except (TypeError, ValueError):
+        return None
+    return -value if negative else value
+
+
+def parse_latest_charge_fen(html: str) -> Optional[int]:
+    """从来店记录页解析最新一条（第一行）的扣费金额（分）。"""
+    if not html:
+        return None
+    match = _VISIT_ROW.search(html)
+    if not match:
+        return None
+    return money_text_to_fen(match.group(3))
+
+
+async def call_force_leave(
+    urls: List[str],
+    fallback_ips: List[str],
+    timeout: int,
+    cookie: str,
+    username: str,
+    password: str,
+    user_id: int,
+) -> Optional[Dict[str, Any]]:
+    """用机器人（工作人员）会话调用站点 /api/forceleave 代为离店；网络失败返回 None。"""
+    import aiohttp
+
+    try:
+        from . import dcs_api as api  # type: ignore
+    except ImportError:  # pragma: no cover - 目录导入方式
+        import dcs_api as api  # type: ignore
+
+    for route in api._build_routes(list(urls), list(fallback_ips or [])):
+        if not route.secure:
+            continue
+        auth, kind, _err = await api._resolve_cookie(route, cookie, username, password, timeout)
+        if kind:
+            continue
+        url = route.origin + "/api/forceleave"
+        headers = {"User-Agent": api.USER_AGENT, "Cookie": auth}
+        try:
+            timeout_cfg = aiohttp.ClientTimeout(total=max(3, int(timeout)))
+            async with aiohttp.ClientSession(timeout=timeout_cfg) as session:
+                async with api._request(
+                    session,
+                    "POST",
+                    url,
+                    route.connect_ip,
+                    json={"userId": int(user_id)},
+                    headers=headers,
+                ) as resp:
+                    body_text = await resp.text()
+                    try:
+                        data = json.loads(body_text) if body_text else None
+                    except Exception:  # noqa: BLE001 - 非 JSON（如 500 页面）
+                        data = None
+                    if isinstance(data, dict):
+                        return data
+                    return {"success": False, "error": f"HTTP_{resp.status}"}
+        except Exception:  # noqa: BLE001 - 换下一条线路
+            continue
+    return None
+
+
+async def fetch_latest_charge_fen(
+    urls: List[str],
+    fallback_ips: List[str],
+    timeout: int,
+    cookie: str,
+    username: str,
+    password: str,
+    user_id: int,
+) -> Optional[int]:
+    """抓取用户来店记录页，返回最新一条的扣费（分）；失败返回 None。"""
+    import aiohttp
+
+    try:
+        from . import dcs_api as api  # type: ignore
+    except ImportError:  # pragma: no cover - 目录导入方式
+        import dcs_api as api  # type: ignore
+
+    for route in api._build_routes(list(urls), list(fallback_ips or [])):
+        if not route.secure:
+            continue
+        auth, kind, _err = await api._resolve_cookie(route, cookie, username, password, timeout)
+        if kind:
+            continue
+        url = route.origin + f"/manage/users/{int(user_id)}/visits"
+        headers = {"User-Agent": api.USER_AGENT, "Cookie": auth}
+        try:
+            timeout_cfg = aiohttp.ClientTimeout(total=max(3, int(timeout)))
+            async with aiohttp.ClientSession(timeout=timeout_cfg) as session:
+                async with api._request(session, "GET", url, route.connect_ip, headers=headers) as resp:
+                    if resp.status != 200:
+                        continue
+                    return parse_latest_charge_fen(await resp.text())
         except Exception:  # noqa: BLE001 - 换下一条线路
             continue
     return None
@@ -101,8 +230,18 @@ def format_attend_reply(
         return "这个 QQ 还没绑定会馆账号：打开会馆网站 →「管理页」→「QQ绑定」完成绑定后再试", None
     if error == "NOT_IN":
         return "你现在不在店里哦", None
+    if error == "NOT_FOUND":
+        return "没有查到你的在店记录：你可能不在店，或这个 QQ 还没绑定会馆账号（可到网站绑定后再试）", None
     if error == "UNAUTHORIZED":
         return "机器人令牌配置有误，请让维护者检查", None
+    if error == "NO_TOKEN":
+        return "机器人还没配置站点令牌，请联系维护者", None
     if error == "BAD_QQ":
         return "无法识别你的 QQ 号", None
+    if error.startswith("HTTP_404") or error.startswith("HTTP_405"):
+        return "会馆网站还没有更新到这个功能（缺少自助离店接口），请联系维护者", None
+    if error.startswith("HTTP_5"):
+        return "离店失败（可能已经不在店了），请稍后再试", None
+    if error.startswith("HTTP_"):
+        return "会馆网站暂时返回异常，请稍后再试", None
     return "操作失败，请稍后再试", None
