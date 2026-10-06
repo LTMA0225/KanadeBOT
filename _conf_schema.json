@@ -235,5 +235,10 @@
     "description": "自助离店冷却（秒 / 人）",
     "type": "int",
     "default": 30
+  },
+  "bind_cooldown_seconds": {
+    "description": "/bd QQ绑定冷却（秒 / 人）",
+    "type": "int",
+    "default": 15
   }
 }

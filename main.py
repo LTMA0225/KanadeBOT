@@ -17,6 +17,7 @@ import importlib.util
 import inspect
 import json
 import math
+import re
 import sys
 import tempfile
 import time
@@ -37,6 +38,12 @@ try:
         call_force_leave,
         fetch_latest_charge_fen,
         format_attend_reply,
+    )
+    from .dcs_bind import (
+        call_qq_bind_verify,
+        format_bind_reply,
+        is_valid_bind_code,
+        normalize_bind_code,
     )
     from .dcs_api import (
         DEFAULT_FALLBACK_IPS,
@@ -79,6 +86,12 @@ except ImportError:  # pragma: no cover - 取决于运行环境
         call_force_leave,
         fetch_latest_charge_fen,
         format_attend_reply,
+    )
+    from dcs_bind import (
+        call_qq_bind_verify,
+        format_bind_reply,
+        is_valid_bind_code,
+        normalize_bind_code,
     )
     from dcs_api import (
         DEFAULT_FALLBACK_IPS,
@@ -178,6 +191,7 @@ class DcsWhosinPlugin(Star):
         self._webhook = None  # WebhookReceiver，在 initialize 中创建
         self._mj_task: asyncio.Task | None = None  # /mj 表情预取任务
         self._attend_last: dict[str, float] = {}  # @bot 自助上机冷却
+        self._bind_last: dict[str, float] = {}  # /bd QQ绑定冷却
         self._pricing: dict | None = None
         self._pricing_at = 0.0
         self._pricing_default_logged = False
@@ -473,6 +487,53 @@ class DcsWhosinPlugin(Star):
         text = await self._attend_action(event, "leave")
         if text:
             yield event.plain_result(text)
+
+    # ------------------------------------------------------------------
+    # 指令：/bd 验证码 —— QQ 绑定（网站「个人信息」页获取验证码）
+    # ------------------------------------------------------------------
+    @filter.regex(r"(?i)^bd\s*\+?\s*(.*)$")
+    async def bind_qq(self, event: AstrMessageEvent):
+        """QQ 绑定：/bd 验证码（也支持 /bd验证码）"""
+        if not event.is_at_or_wake_command:
+            return  # 仅响应 /bd 或 @bot bd，避免普通聊天误触发
+        if not self._policy_allows(event):
+            return
+        text = event.get_message_str().strip()
+        match = re.match(r"(?i)^bd\s*\+?\s*(.*)$", text)
+        code = normalize_bind_code(match.group(1)) if match else ""
+        if not is_valid_bind_code(code):
+            yield event.plain_result(
+                "用法：/bd 验证码\n"
+                "验证码在会馆网站→「个人信息」页获取（填写待绑QQ后页面上会显示）。"
+            )
+            return
+        qq = str(event.get_sender_id() or "").strip()
+        if not qq.isdigit():
+            return
+        now = time.monotonic()
+        cooldown = int(self.config.get("bind_cooldown_seconds", 15) or 0)
+        last = self._bind_last.get(qq, 0.0)
+        if cooldown > 0 and now - last < cooldown:
+            remain = int(cooldown - (now - last)) + 1
+            yield event.plain_result(f"操作太频繁，请 {remain} 秒后再试")
+            return
+        self._bind_last[qq] = now
+        if len(self._bind_last) > 500:
+            cutoff = now - max(cooldown, 60) * 2
+            self._bind_last = {k: v for k, v in self._bind_last.items() if v >= cutoff}
+
+        urls, fallback_ips, timeout, _cookie, _user, _password = self._site_targets()
+        result = None
+        try:
+            result = await call_qq_bind_verify(urls, fallback_ips, timeout, qq, code)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[dcs_whosin] /bd 绑定请求异常：{exc!r}")
+        if isinstance(result, dict) and result.get("success"):
+            logger.info(f"[dcs_whosin] /bd 绑定成功：QQ={qq}")
+        else:
+            err = result.get("error") if isinstance(result, dict) else "网络失败"
+            logger.info(f"[dcs_whosin] /bd 绑定未成功：QQ={qq} 原因={err}")
+        yield event.plain_result(format_bind_reply(result, qq))
 
     # ------------------------------------------------------------------
     # 静默策略：私聊开关 / 群白名单 / 频率限制
