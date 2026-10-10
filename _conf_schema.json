@@ -1,11 +1,24 @@
 {
+  "bot_api_key": {
+    "description": "统一 Bot API 明钥（网站「高级管理 → Bot 管理」分配）",
+    "type": "string",
+    "default": "",
+    "secret": true,
+    "hint": "缺失或无效时查询/播报/绑定都会给出提示；明钥只保存在本机配置中"
+  },
+  "bot_qqid": {
+    "description": "机器人 QQ 号（轮询调用统一接口时使用的 qqid 字段）",
+    "type": "string",
+    "default": "",
+    "hint": "建议填写机器人账号的 QQ 号"
+  },
   "target_urls": {
-    "description": "目标网页地址（按顺序尝试；只建议使用 HTTPS）",
+    "description": "站点地址（按顺序尝试；只建议使用 HTTPS）",
     "type": "list",
     "default": [
       "https://dcstream.top/whosin"
     ],
-    "hint": "格式示例：[\"https://dcstream.top/whosin\"]。明文 http:// 地址只会匿名访问，不会发送账号密码或 Cookie"
+    "hint": "格式示例：[\"https://dcstream.top/whosin\"]；统一 Bot API 会使用同一站点的 /api/botAction"
   },
   "fallback_ips": {
     "description": "备用 IP（域名访问失败时直连；证书仍按域名校验，不会降级为明文）",
@@ -16,25 +29,24 @@
     "hint": "格式示例：[\"47.116.47.191\"]；留空 = 不使用备用 IP"
   },
   "timeout_seconds": {
-    "description": "爬取超时时间（秒）",
+    "description": "站点请求超时（秒）",
     "type": "int",
     "default": 10
   },
   "cookie": {
-    "description": "站点 Cookie（当目标页面要求登录时填写；只经 HTTPS 发送）",
+    "description": "站点 Cookie（计费表/来店记录页需要登录时使用；只经 HTTPS 发送）",
     "type": "string",
     "default": "",
     "secret": true,
-    "hint": "若 /whosin 被重定向到登录页，可填写浏览器请求头中的完整 Cookie；优先于账号密码方式"
+    "hint": "统一 Bot API 不需要 Cookie；仅在抓取计费表与代离店时使用，优先于账号密码"
   },
   "login_username": {
-    "description": "站点账号（自动登录用，解决 /whosin 需要登录的问题）",
+    "description": "站点账号（抓取计费表与代离店用；统一 Bot API 不需要）",
     "type": "string",
-    "default": "",
-    "hint": "填写后插件会自动登录站点获取会话，无需手动维护 Cookie"
+    "default": ""
   },
   "login_password": {
-    "description": "站点密码（自动登录用；只经 HTTPS 发送）",
+    "description": "站点密码（只经 HTTPS 发送）",
     "type": "string",
     "default": "",
     "secret": true
@@ -50,7 +62,7 @@
     "default": 30
   },
   "image_theme": {
-    "description": "图片模板主题",
+    "description": "图片模板主题（当前模板 id 沿用历史名，实际样式为宵崎奏主题 + 站酷快乐体）",
     "type": "string",
     "options": [
       "cyberpunk-bw"
@@ -177,42 +189,6 @@
     "type": "int",
     "default": 6
   },
-  "presence_visits_url": {
-    "description": "站点访问记录接口地址（留空 = 自动使用目标站点的 /api/visits/recent）",
-    "type": "string",
-    "default": "",
-    "hint": "访问记录流模式可捕捉任意短时进离店，扣费为站点真实结算金额；接口不可用时自动退回在店快照模式"
-  },
-  "presence_record_fresh_minutes": {
-    "description": "记录流模式的播报保鲜时间（分钟）",
-    "type": "int",
-    "default": 10,
-    "hint": "更早的记录只做去重不再播报，避免机器人重启后补发大量旧消息"
-  },
-  "webhook_enable": {
-    "description": "Webhook 接收服务（站点实时推送进/离店事件）",
-    "type": "bool",
-    "default": false,
-    "hint": "开启后监听端口接收站点推送；站点无法直连时自动回退记录流/快照模式，不会漏报"
-  },
-  "webhook_bind": {
-    "description": "Webhook 监听地址",
-    "type": "string",
-    "default": "0.0.0.0",
-    "hint": "端口映射/隧道场景用 0.0.0.0；只允许本机访问用 127.0.0.1"
-  },
-  "webhook_port": {
-    "description": "Webhook 监听端口",
-    "type": "int",
-    "default": 8765
-  },
-  "webhook_secret": {
-    "description": "Webhook 令牌（与站点 .env 的 DCS_WEBHOOK_TOKEN 一致）",
-    "type": "string",
-    "default": "",
-    "secret": true,
-    "hint": "留空 = 不校验令牌（不建议）；设置后校验请求头 X-DCS-Token"
-  },
   "mj_enable": {
     "description": "mj 指令（发送 bot 收藏的表情包）",
     "type": "bool",
@@ -229,7 +205,7 @@
     "description": "自助离店（@bot 离店）",
     "type": "bool",
     "default": true,
-    "hint": "需要站点端 /api/bot/action 接口与令牌；只影响发送者自己的账号；不支持机器人进店（进店请在网站操作）"
+    "hint": "只影响发送者自己的账号；不支持机器人进店（进店请在网站操作）"
   },
   "attend_cooldown_seconds": {
     "description": "自助离店冷却（秒 / 人）",

@@ -1,8 +1,8 @@
 name: astrbot_plugin_dcs_whosin
 display_name: 音游窝查询机器人
-desc: 查询音游窝店内实时在店人员（玩家 / 管理员 / 士大夫），本机渲染宵崎奏主题卡片（背景宵崎奏 + 萌感字体站酷快乐体）+ 文本返回；自动播报玩家进店/离店（Webhook 实时 + 记录流 + 快照三通道统一去重；含时长与真实扣费）；支持 @bot 自助离店（双通道）与 /bd QQ 绑定；附带 25h、时段价格（jg）与收藏表情（mj）指令。
-short_desc: 在店查询（/j）+ 进离店播报 + @bot 自助离店 + /bd 绑定 + /jg + /mj + /25h
-version: v2.7.0
+desc: 查询音游窝店内实时在店人员（站点统一 Bot API），本机渲染宵崎奏主题卡片（背景宵崎奏 + 萌感字体站酷快乐体）+ 文本返回；自动播报玩家进店/离店（含时长与扣费）；支持 @bot 自助离店与 /bd QQ 绑定；附带 25h、时段价格（jg）与收藏表情（mj）指令。
+short_desc: 音游窝在店查询（/j）+ 进离店播报 + @bot 自助离店 + /bd 绑定 + /jg + /mj + /25h
+version: v3.0.0
 author: 音游窝
 support_platforms:
   - aiocqhttp

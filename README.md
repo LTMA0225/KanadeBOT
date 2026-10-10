@@ -1,4 +1,7 @@
-# 音游窝 QQ 机器人（AstrBot 插件）v2.7.0
+# 音游窝 QQ 机器人（AstrBot 插件）v3.0.0
+
+> ⚠️ **使用声明**：本机器人仅供「音游窝」店内群内部使用。
+> 本项目未获得任何其他组织、公司或个人的授权、许可或背书，亦与其不存在任何关联。
 
 > 仓库：KanadeBOT · 群昵称：宵崎奏bot
 >
@@ -7,8 +10,9 @@
 
 - 机器人框架：AstrBot ≥ 4.13（生产环境使用 4.28.1 桌面版）
 - QQ 协议端：NapCat（OneBot v11，反向 WebSocket）
-- 配套网页端：[MioAoi/dcs-web](https://github.com/MioAoi/dcs-web)（音游窝网站，本机器人对接的业务系统）
 - 开发语言：Python 3.10+
+- 数据接口：**站点统一 Bot API**（`POST /api/botAction`，明钥鉴权、按 action 授权）
+- 配套网页端：[MioAoi/dcs-web](https://github.com/MioAoi/dcs-web)（音游窝网站，本机器人对接的业务系统）
 - 图片：**本机渲染**——Jinja2 生成 HTML，Playwright 驱动本机浏览器内核截图
   （Windows 默认用系统自带的 Edge）；风格为**宵崎奏主题 + 萌感字体（站酷快乐体）**，
   不调用任何第三方或社区渲染服务
@@ -17,7 +21,7 @@
 
 | 指令 | 说明 | 频率限制 |
 |------|------|----------|
-| `j`（默认 `/j`） | 抓取在店数据，整理玩家 / 管理员 / 士大夫名单，发送「宵崎奏主题图片 + 文本」 | 同人同群 60 秒冷却；同群两次回复至少间隔 5 秒 |
+| `j`（默认 `/j`） | 通过统一 Bot API 获取在店人员，整理玩家 / 管理员 / 士大夫名单，发送「宵崎奏主题图片 + 文本」 | 同人同群 60 秒冷却；同群两次回复至少间隔 5 秒 |
 | `25h`（默认 `/25h`） | 回复 `25時、ナイトコードで` | 不设冷却 |
 | `jg`（默认 `/jg`） | 查询本时段每小时游玩价格（含折扣与封顶说明，价目表随站点自动更新） | 不设冷却 |
 | `mj`（默认 `/mj`） | 发送 bot 账号收藏的表情包（本地缓存，QQ 链接过期也不影响） | 不设冷却；受同群最小间隔约束 |
@@ -28,20 +32,41 @@
 
 图片与文本内容：
 
-- 图片：**宵崎奏主题卡片**（背景为宵崎奏夜景素材、字体为站酷快乐体）；
+- 图片：**宵崎奏主题卡片**（背景为宵崎奏素材、字体为站酷快乐体）；
   **玩家**每位一个信息小框（昵称、入店时间、游玩分钟数）；**管理员 / 士大夫**单独一栏；
 - 文本：`玩家：甲,乙`（英文逗号分隔）；有管理 / 士大夫时另起一行 `管理/STAFF：丙,丁`。
 
 行为规则：
 
 - **玩家数量为 0**（只有管理员 / 士大夫，或完全无人）时，回复固定文案：`店内无玩家，快来吧唧！`；
-- 抓取失败时只在群里给出通用提示（如「查询失败：站点暂时无法访问，请稍后再试。」），
-  不暴露地址、IP 或异常细节；详细原因写入 AstrBot 日志，并通过状态推送告知维护者；
+- 接口失败时只在群里给出通用提示（如「查询失败：站点暂时无法访问，请稍后再试。」），
+  不暴露地址、明钥或异常细节；详细原因写入 AstrBot 日志，并通过状态推送告知维护者；
 - 图片渲染失败或超时时降级为文字版，插件不会崩溃。
 
-## 进 / 离店播报（三通道，自动选路、统一去重）
+## 统一 Bot API（数据来源）
 
-开启 `presence_notify_enable` 后，玩家进出店会自动播报：
+站点在「高级管理 → Bot 管理」为机器人分配**明钥**与**权限**；机器人以
+
+```
+POST /api/botAction
+Content-Type: application/json
+{ "qqid": "<操作者QQ>", "key": "<Bot明钥>", "action": "<动作>", "payload": "<字符串>" }
+```
+
+调用实时数据。当前支持的动作：
+
+| action | 用途 | 权限 |
+|--------|------|------|
+| `getPresentUsers` | 在店人员实时名单（查询与播报共用） | 必开 |
+| `bindQq` | QQ 绑定校验 | 必开 |
+| `purchase` / `getBalance` | 饮品购买 / 余额查询 | 站点侧筹备中（接口已预留） |
+
+- 明钥只保存在本机插件配置（`bot_api_key`），不会出现在群聊或日志中；
+- 站点返回 `{success:true,data}` 或 `{success:false,message}`，统一在插件内转为友好提示。
+
+## 进 / 离店播报
+
+开启 `presence_notify_enable` 后，插件按固定间隔轮询统一 Bot API 的在店名单并差分播报：
 
 - 玩家进店：
 
@@ -49,7 +74,7 @@
   【Kanade】XXX进店了
   ```
 
-- 玩家离店（竖向排版，时长为站点口径向上取整、扣费为真实结算金额）：
+- 玩家离店（竖向排版，时长为站点口径向上取整、扣费为站点计费规则金额）：
 
   ```
   【Kanade】XXX离店了
@@ -57,38 +82,30 @@
   扣费X.XX元（线上余额）
   ```
 
-三种数据通道自动选择、共用一张去重表（任何事件只播报一次，更高优先级通道可用后自动切换、无需重启）：
+实现要点：
 
-- **Webhook 实时通道（最快，可选）**：站点配置 `DCS_WEBHOOK_URLS` 后，进店/离店事件实时 POST
-  到插件内置接收端口（默认 `0.0.0.0:8765/webhook`，令牌校验头 `X-DCS-Token`，健康检查 `GET /health`）；
-- **访问记录流（推荐，无盲区）**：读取站点 `/api/visits/recent`（只读、工作人员会话可访问），
-  数据库里每一次进出店都有记录，任意短的访问都不会漏报，扣费为真实结算金额；
-- **在店快照模式（最终兜底）**：以上通道不可用时，解析在店页面内嵌数据按用户差分判定
-  （轮询间隔可配，默认 30 秒；离店结算取两次轮询的中点，误差 ≤ 半个轮询周期）。
+- 轮询间隔默认 30 秒（`presence_check_interval_seconds`，范围 15-3600）；
+- 离店结算时刻取「最后一次在店」与「本次发现」的中点（误差 ≤ 半个轮询周期）；
+- 只播报玩家（管理员 / 士大夫不播报）；自助离店与轮询共用同一张去重表，不会重复播报；
+- 播报目标见 `presence_targets`，留空时自动发到 `allowed_groups` 中配置的群；
+- 站点计费表每 6 小时自动同步（`/chargecalc`），调价自动跟随；离店金额以网站实际扣费为准。
 
-- 只播报玩家（管理员 / 士大夫不播报）；去重表保留 24 小时；
-- 播报目标见 `presence_targets`，留空时自动发到 `allowed_groups` 中配置的群。
-
-> Webhook / 访问记录流为**可选的站点端增强**（配套交付包含 `app/api/visits/recent`、`app/api/bot/action` 等文件）；未部署时自动使用快照模式，同样可用。
-
-## @bot 自助离店（双通道：站点接口为主，纯机器人兜底）
+## @bot 自助离店（按 QQ 绑定自动结算）
 
 玩家在群里发 **`@机器人 离店`**（或 `/离店`），机器人即用发送者的 QQ 完成离店结算：
 
-- **主方案**：调用站点机器人接口 `/api/bot/action`（配套交付包），返回精确业务结果，由站点直接结算；
-- **备用方案（无需站点更新）**：机器人从在店数据里按 **QQ 绑定（qqid）** 找到玩家账号，
-  调用站点现成的**工作人员代离店接口**完成结算，并从来店记录页读取**真实扣费金额**；
-- 两个通道自动切换，结果写入统一去重表；**只支持离店**（不支持机器人进店，避免"人未到店就被远程进店"）；
-  每人 30 秒冷却；只影响发送者自己的账号；未绑定 QQ / 不在店 均有对应提示。
+- 在店名单来自统一 Bot API，按 **QQ 绑定（qqid）** 找到玩家账号；
+- 调用站点现成的**工作人员代离店接口**完成结算，并从来店记录页读取**真实扣费金额**；
+- **只支持离店**（不支持机器人进店，避免"人未到店就被远程进店"）；每人 30 秒冷却；
+- 只影响发送者自己的账号；未绑定 QQ / 不在店 均有对应提示。
 
 ## QQ 绑定（/bd 验证码）
 
 1. 玩家在网站「个人信息」页填写要绑定的 QQ，页面会显示**绑定验证码**；
 2. 玩家用该 QQ 在群里发送 `/bd 验证码`（也支持 `/bd验证码`，大小写不敏感）；
-3. 机器人读取发送者 QQ 与验证码，调用站点验证接口自动完成绑定，并回复结果。
+3. 机器人调用统一 Bot API 的 `bindQq` 动作自动完成绑定，并回复结果。
 
-- 只使用发送者自己的 QQ 完成验证（只有 QQ 本人能绑定自己账号）；
-- 无需站点更新（复用站点现有验证接口）；每人 15 秒冷却（`bind_cooldown_seconds`）。
+只使用发送者自己的 QQ 完成验证（只有 QQ 本人能绑定自己账号）；每人 15 秒冷却（`bind_cooldown_seconds`）。
 
 ## 时段价格查询（/jg）
 
@@ -109,6 +126,7 @@
 
 | 方面 | 做法 |
 |------|------|
+| Bot 明钥 | 仅保存在本机插件配置（密文项）；日志与群聊中绝不输出；权限按 action 由站点控制 |
 | 站点凭据 | 账号密码与会话 Cookie **只经 HTTPS 发送**；明文 `http://` 地址只做匿名访问 |
 | 备用线路 | 域名不通时直连备用 IP，但 SNI、Host 与证书校验仍使用域名，证书不符即放弃 |
 | 重定向 | 手动跟随，只跟随同站点跳转，Cookie 不会被带到其他站点 |
@@ -124,14 +142,14 @@
 
 ```
 astrbot_plugin_dcs_whosin/
-├── main.py                   插件入口（指令、静默策略、状态推送、依赖补装、热重载友好）
-├── dcs_api.py                站点抓取与解析（aiohttp；HTTPS 与备用 IP 线路）
+├── main.py                   插件入口（指令、静默策略、状态推送、依赖补装）
+├── dcs_botapi.py             统一 Bot API 客户端（明钥鉴权、数据解析）
+├── dcs_api.py                站点会话与线路辅助（登录缓存、HTTPS/备用 IP）
 ├── dcs_render.py             本机图片渲染与缓存（Jinja2 + Playwright，独立线程）
-├── dcs_presence.py           进/离店播报（在店数据解析、计费复刻、统一去重表）
-├── dcs_attend.py             @bot 自助离店（站点接口为主、纯机器人兜底）
-├── dcs_bind.py               /bd QQ 绑定（验证码提交）
+├── dcs_presence.py           进/离店播报与计费（差分、计费复刻、时段价格文案）
+├── dcs_attend.py             @bot 自助离店（工作人员代离店 + 真实扣费读取）
+├── dcs_bind.py               /bd QQ 绑定（验证码提交与结果文案）
 ├── dcs_mj.py                 /mj 收藏表情（收藏读取 + 本地缓存）
-├── dcs_webhook.py            Webhook 接收服务（/webhook + /health，令牌校验）
 ├── templates/whosin.html     图片模板（HTML + CSS + Jinja2）
 ├── assets/                   本地素材：bg.jpg（宵崎奏）、logo.svg、fonts/（站酷快乐体，SIL OFL）
 ├── skills/                   随插件提供的 Skills（whosin-query、25h）
@@ -177,7 +195,8 @@ docker compose up -d --build
 1. 安装 [AstrBot 桌面客户端](https://github.com/AstrBotDevs/AstrBot-desktop/releases)；
 2. 将本插件文件夹复制到 AstrBot 数据目录的 `data/plugins/` 下；
 3. 在 AstrBot WebUI「插件」页确认 `astrbot_plugin_dcs_whosin` 已加载并启用；
-4. 插件首次启动会用 AstrBot 自带的 pip 安装器在后台补装 jinja2 / playwright（装好前只发文字版）。
+4. 在插件配置中填写 **Bot 明钥**（`bot_api_key`）与机器人 QQ（`bot_qqid`）；
+5. 插件首次启动会用 AstrBot 自带的 pip 安装器在后台补装 jinja2 / playwright（装好前只发文字版）。
 
 ## NapCat 对接（手动部署时）
 
@@ -191,22 +210,24 @@ docker compose up -d --build
 
 | 配置 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `target_urls` | list | `["https://dcstream.top/whosin"]` | 目标地址，按顺序尝试；明文地址不会携带凭据 |
+| `bot_api_key` | string（密文） | 空 | 统一 Bot API 明钥（网站「高级管理 → Bot 管理」分配） |
+| `bot_qqid` | string | 空 | 机器人 QQ 号（轮询调用统一接口时使用） |
+| `target_urls` | list | `["https://dcstream.top/whosin"]` | 站点地址；统一 Bot API 使用同一站点的 `/api/botAction` |
 | `fallback_ips` | list | `["47.116.47.191"]` | 域名访问失败时直连的备用 IP（证书仍按域名校验） |
 | `timeout_seconds` | int | `10` | 单次请求超时（秒） |
-| `cookie` | string（密文） | 空 | 站点 Cookie（优先于账号密码方式） |
-| `login_username` | string | 空 | 站点账号（自动登录用） |
+| `cookie` | string（密文） | 空 | 站点 Cookie（计费表/来店记录页需要登录时使用） |
+| `login_username` | string | 空 | 站点账号（抓取计费表与代离店用） |
 | `login_password` | string（密文） | 空 | 站点密码（自动登录用，会话失效自动重新登录） |
 | `enable_image` | bool | `true` | 是否发送渲染图片（关闭后只发文本） |
 | `cache_ttl_seconds` | int | `30` | 图片缓存时间（秒，0 = 不缓存） |
-| `image_theme` | string | `cyberpunk-bw` | 图片模板主题（当前模板 id 沿用历史名，实际样式为宵崎奏主题 + 站酷快乐体） |
+| `image_theme` | string | `cyberpunk-bw` | 图片模板主题（id 沿用历史名，实际为宵崎奏主题 + 站酷快乐体） |
 | `render_browser` | string | `auto` | 浏览器内核：`auto`（Edge → Chrome → 自带 Chromium）/ `msedge` / `chrome` / `chromium` |
 | `render_browser_path` | string | 空 | 自定义浏览器可执行文件路径（填写后优先使用） |
 | `render_timeout_seconds` | int | `20` | 单次渲染超时（秒，含首次启动浏览器；超时改发文字版） |
 | `cooldown_seconds` | int | `60` | `/j` 同人同群冷却（秒，0 = 不限制；`/25h` 不受限制） |
 | `group_interval_seconds` | int | `5` | `/j` 同群回复最小间隔（秒，0 = 不限制） |
 | `allowed_groups` | list | `[]` | 只响应的群号白名单（空 = 不限制） |
-| `allow_private_chat` | bool | `false` | 是否响应私聊（与群白名单互不影响；注意适配器补丁会更早丢弃私聊） |
+| `allow_private_chat` | bool | `false` | 是否响应私聊（适配器补丁会更早丢弃私聊） |
 | `status_push_enable` | bool | `false` | 是否开启状态推送 |
 | `status_push_mode` | string | `smart` | `smart`：启动、站点异常 / 恢复时推送 + 心跳；`interval`：每次检查都推送 |
 | `status_push_interval_seconds` | int | `600` | 状态检查间隔（秒；`interval` 模式下即推送间隔） |
@@ -220,12 +241,6 @@ docker compose up -d --build
 | `presence_min_gap_seconds` | int | `2` | 多条播报之间的最小发送间隔（秒） |
 | `presence_pricing_url` | string | 空 | 计费表页面地址；留空 = 自动用站点的 `/chargecalc` |
 | `presence_pricing_refresh_hours` | int | `6` | 计费表自动刷新间隔（小时） |
-| `presence_visits_url` | string | 空 | 访问记录接口地址；留空 = 自动用站点的 `/api/visits/recent` |
-| `presence_record_fresh_minutes` | int | `10` | 记录流播报保鲜时间（分钟；更早的记录只去重不播报） |
-| `webhook_enable` | bool | `false` | Webhook 接收服务开关 |
-| `webhook_bind` | string | `0.0.0.0` | 监听地址（隧道/端口映射用 `0.0.0.0`；仅本机用 `127.0.0.1`） |
-| `webhook_port` | int | `8765` | 监听端口 |
-| `webhook_secret` | string（密文） | 空 | 令牌；校验请求头 `X-DCS-Token`（与站点 `.env` 的 `DCS_WEBHOOK_TOKEN` 一致） |
 | `mj_enable` | bool | `true` | `/mj` 收藏表情指令开关 |
 | `mj_sticker_index` | int | `0` | 使用收藏表情中的第几个（先用 `/mjlist` 查看编号） |
 | `attend_enable` | bool | `true` | `@bot 离店` 自助离店开关（不支持机器人进店） |
@@ -246,38 +261,38 @@ docker compose up -d --build
 | 版本 | 里程碑 |
 |------|--------|
 | v2.0 | 本机渲染（Playwright + Edge）替换第三方 T2I 服务；Windows 一键部署 / 控制台 / 看门狗 |
-| v2.1 | 进/离店播报；竖向排版、时长向上取整、检查间隔 30 秒；`/jg` 时段价格 |
+| v2.1 | 进/离店播报；竖向排版、时长向上取整；`/jg` 时段价格 |
 | v2.2 | 访问记录流通道（无盲区、真实结算扣费） |
-| v2.3 | Webhook 实时接收服务；三通道统一去重表 |
+| v2.3 | Webhook 实时接收服务；统一去重表 |
 | v2.4 | `/mj` 收藏表情（含本地缓存与预取） |
 | v2.5 | `@bot` 自助离店（双通道；仅离店、防止远程进店） |
-| v2.6 | 纯机器人兜底完善；站点接口为主、本地通道为辅自动切换 |
+| v2.6 | 纯机器人兜底完善；通道自动切换 |
 | v2.7 | `/bd` QQ 绑定（验证码提交自动完成绑定） |
+| **v3.0** | **接入站点统一 Bot API（`getPresentUsers`/`bindQq`）；移除页面抓取、Webhook 与记录流旧通道；项目介绍更新** |
 
 ## 常见问题
 
-1. **查询提示「站点需要登录」或「站点登录失败」？**
-   在插件配置中填写 `login_username` / `login_password`（或浏览器里的完整 Cookie）。详细原因见 AstrBot 日志（关键字 `[dcs_whosin]`）。
-2. **只发文字、不出图？**
+1. **查询提示「机器人密钥无效 / 未配置」？**
+   在插件配置中填写 `bot_api_key`（网站「高级管理 → Bot 管理」分配，注意重置后旧明钥立即失效）。
+2. **查询提示「机器人缺少该功能权限」？**
+   到网站的 Bot 管理页勾选对应权限（`getPresentUsers`、`bindQq`）后保存。
+3. **只发文字、不出图？**
    看 AstrBot 日志：提示缺少依赖时，在插件页为本插件安装依赖后重载；提示找不到浏览器时，
    在 `render_browser_path` 填写 Edge / Chrome 的路径；渲染超时可调大 `render_timeout_seconds`。
-3. **图片里的中文或日文显示为方块？**
+4. **图片里的中文或日文显示为方块？**
    Linux / Docker 需安装中文字体（如 `fonts-noto-cjk`）；Windows 自带字体即可。
-4. **发送 `j` 没反应？**
+5. **发送 `j` 没反应？**
    AstrBot 默认唤醒前缀为 `/`，请发送 `/j`；并确认群号在 AstrBot 白名单与 `allowed_groups` 中。
-5. **抓取到的人数为 0 但实际有人？**
-   站点页面结构可能已变化。解析基于 class 中独立的 `nickname` 词元与角色词元
-   （`staff` / `admin` / `sponsor`），如站点改版请参照 `dcs_api.py` 调整。
-6. **升级 AstrBot 后，状态推送提示「适配器补丁未检测到」？**
+6. **`jg` 价格不对或取不到？**
+   时段价格来自站点 `/chargecalc`，需要 `login_username` / `login_password`（或 Cookie）可登录；每 6 小时自动刷新。
+7. **升级 AstrBot 后，状态推送提示「适配器补丁未检测到」？**
    在控制台选 [4] 重新打补丁，再重启 AstrBot。在此期间 AstrBot 白名单仍只放行目标群。
-7. **`@bot 离店` 提示「会馆网站还没有更新到这个功能」？**
-   站点尚未部署配套接口时会出现；此时机器人会自动使用**纯机器人兜底通道**完成离店（无需站点更新）。
 
 ## 开发与调试
 
 - 修改代码后，在 AstrBot WebUI 的「插件」页点击插件卡片的刷新图标（热重载）；
 - 插件运行日志请在 AstrBot 日志中查看，关键字：`[dcs_whosin]`；
-- 解析逻辑可离线测试：`python -c "from dcs_api import parse_whosin_html; print(parse_whosin_html('<span class=\"nickname staff\">测试</span>'))"`。
+- 统一 API 数据解析可离线测试：`python -c "from dcs_botapi import parse_present_users; print(parse_present_users([{'id':1,'nickname':'测试','role':'CUSTOMER','enteredAt':'2026-10-05T04:29:21.554Z'}]))"`。
 
 ## 灵感与素材来源
 

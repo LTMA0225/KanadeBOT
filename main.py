@@ -1,10 +1,15 @@
-"""音游窝 QQ 查询机器人插件（AstrBot）。
+"""音游窝 QQ 机器人插件（AstrBot）v3.0.0。
 
 提供以下群聊指令：
-- j     查询"音游窝"店内实时在店人员，以图片 + 文本形式发送（同人同群有冷却）。
+- j     查询"音游窝"店内实时在店人员（统一 Bot API），以图片 + 文本形式发送。
 - 25h   娱乐指令，回复 25時、ナイトコードで（不设冷却）。
+- jg    本时段每小时游玩价格。
+- mj    发送 bot 账号收藏的表情包（/mjlist 查看编号）。
+- bd    QQ 绑定：/bd 验证码。
+- @bot 离店  按 QQ 绑定自助离店结算。
+- 自动进 / 离店播报（轮询统一 Bot API 差分，含时长与扣费）。
 
-数据来源为音游窝官网 /whosin 页面，账号密码与 Cookie 只经 HTTPS 发送；
+数据来源：站点统一 Bot API（POST /api/botAction，Bot 明钥鉴权、权限按 action 控制）。
 图片在本机渲染：Jinja2（自动转义）生成 HTML，Playwright 驱动本机浏览器内核截图，
 不调用任何第三方渲染服务。
 """
@@ -34,25 +39,20 @@ from astrbot.core.message.message_event_result import MessageChain
 # 兼容 AstrBot 不同的插件加载方式：优先相对导入，失败则退回到目录导入
 try:
     from .dcs_attend import (
-        call_bot_action,
         call_force_leave,
         fetch_latest_charge_fen,
         format_attend_reply,
     )
     from .dcs_bind import (
-        call_qq_bind_verify,
         format_bind_reply,
         is_valid_bind_code,
         normalize_bind_code,
     )
+    from .dcs_botapi import bot_action, parse_present_users, public_api_error
     from .dcs_api import (
         DEFAULT_FALLBACK_IPS,
         DEFAULT_TARGET_URLS,
         EMPTY_PLAYER_MESSAGE,
-        classify_users,
-        fetch_whosin_users,
-        format_text_message,
-        public_error_text,
     )
     from .dcs_mj import (
         download_sticker,
@@ -64,43 +64,31 @@ try:
         DEFAULT_PRICING,
         calculate_charge_fen,
         fetch_pricing_html,
-        fetch_visits_text,
         format_current_rate_message,
         format_fee_yuan,
-        map_role,
         parse_pricing,
-        parse_visits_payload,
-        parse_whosin_snapshot,
-        process_visit_records,
-        snapshot_from_users,
         visit_key,
     )
     from .dcs_render import WhosinRenderer
-    from .dcs_webhook import WebhookReceiver
 except ImportError:  # pragma: no cover - 取决于运行环境
     _plugin_dir = str(Path(__file__).resolve().parent)
     if _plugin_dir not in sys.path:
         sys.path.insert(0, _plugin_dir)
     from dcs_attend import (
-        call_bot_action,
         call_force_leave,
         fetch_latest_charge_fen,
         format_attend_reply,
     )
     from dcs_bind import (
-        call_qq_bind_verify,
         format_bind_reply,
         is_valid_bind_code,
         normalize_bind_code,
     )
+    from dcs_botapi import bot_action, parse_present_users, public_api_error
     from dcs_api import (
         DEFAULT_FALLBACK_IPS,
         DEFAULT_TARGET_URLS,
         EMPTY_PLAYER_MESSAGE,
-        classify_users,
-        fetch_whosin_users,
-        format_text_message,
-        public_error_text,
     )
     from dcs_mj import (
         download_sticker,
@@ -112,19 +100,12 @@ except ImportError:  # pragma: no cover - 取决于运行环境
         DEFAULT_PRICING,
         calculate_charge_fen,
         fetch_pricing_html,
-        fetch_visits_text,
         format_current_rate_message,
         format_fee_yuan,
-        map_role,
         parse_pricing,
-        parse_visits_payload,
-        parse_whosin_snapshot,
-        process_visit_records,
-        snapshot_from_users,
         visit_key,
     )
     from dcs_render import WhosinRenderer
-    from dcs_webhook import WebhookReceiver
 
 PLUGIN_NAME = "astrbot_plugin_dcs_whosin"
 
@@ -158,7 +139,7 @@ def _detect_adapter_patch() -> bool | None:
 
 
 class DcsWhosinPlugin(Star):
-    """音游窝查询机器人插件主类。"""
+    """音游窝机器人插件主类。"""
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -180,17 +161,13 @@ class DcsWhosinPlugin(Star):
         self._adapter_patched: bool | None = None
         # 已见过的群（首次见到时记录一条日志，便于配置白名单）
         self._seen_groups: set[str] = set()
-        # 进/离店播报：快照状态、记录流状态、计费表缓存与后台任务
+        # 进/离店播报：在店快照、统一去重表与计费表缓存
         self._presence: dict[str, dict] = {}
         self._presence_ready = False
         self._presence_task: asyncio.Task | None = None
-        self._presence_mode = "snapshot"  # snapshot（在店快照）/ records（访问记录流）
-        self._records_state: dict | None = None
-        self._records_fail_count = 0
-        self._records_tick_counter = 0
-        self._webhook = None  # WebhookReceiver，在 initialize 中创建
+        self._records_state: dict | None = None  # 统一去重表 {"seen": {...}}
         self._mj_task: asyncio.Task | None = None  # /mj 表情预取任务
-        self._attend_last: dict[str, float] = {}  # @bot 自助上机冷却
+        self._attend_last: dict[str, float] = {}  # @bot 自助离店冷却
         self._bind_last: dict[str, float] = {}  # /bd QQ绑定冷却
         self._pricing: dict | None = None
         self._pricing_at = 0.0
@@ -205,7 +182,7 @@ class DcsWhosinPlugin(Star):
             return Path(tempfile.gettempdir()) / PLUGIN_NAME / "image_cache"
 
     async def initialize(self) -> None:
-        """插件加载后检查适配器补丁，并启动状态推送后台任务。"""
+        """插件加载后检查适配器补丁，并启动各后台任务。"""
         self._adapter_patched = _detect_adapter_patch()
         if self._adapter_patched is False:
             logger.warning(
@@ -222,17 +199,6 @@ class DcsWhosinPlugin(Star):
         if self._presence_task is None or self._presence_task.done():
             self._presence_task = asyncio.create_task(self._presence_loop())
             logger.info("[dcs_whosin] 进离店播报任务已启动。")
-        if self._webhook is None:
-            self._webhook = WebhookReceiver(
-                str(self.config.get("webhook_bind", "0.0.0.0") or "0.0.0.0"),
-                int(self.config.get("webhook_port", 8765) or 8765),
-                str(self.config.get("webhook_secret", "") or ""),
-                self._on_webhook_event,
-            )
-        if self.config.get("webhook_enable", False):
-            await self._webhook.start()
-        else:
-            logger.info("[dcs_whosin] Webhook 接收服务未启用（webhook_enable=false）")
         if self.config.get("mj_enable", True):
             if self._mj_task is None or self._mj_task.done():
                 self._mj_task = asyncio.create_task(self._mj_prefetch())
@@ -267,6 +233,42 @@ class DcsWhosinPlugin(Star):
         logger.info("[dcs_whosin] 图片渲染依赖安装完成，下一次查询起恢复出图。")
 
     # ------------------------------------------------------------------
+    # 统一 Bot API
+    # ------------------------------------------------------------------
+    def _api_config(self):
+        """统一 Bot API 的连接配置：(urls, fallback_ips, timeout, key)。"""
+        urls = self.config.get("target_urls", DEFAULT_TARGET_URLS)
+        if isinstance(urls, str):
+            urls = [urls]
+        fallback_ips = _as_list(self.config.get("fallback_ips", DEFAULT_FALLBACK_IPS))
+        timeout = int(self.config.get("timeout_seconds", 10) or 10)
+        key = str(self.config.get("bot_api_key", "") or "").strip()
+        return urls, fallback_ips, timeout, key
+
+    def _api_qqid(self) -> str:
+        """轮询等无发送者场景使用的 qqid（机器人号，可配置）。"""
+        cfg = str(self.config.get("bot_qqid", "") or "").strip()
+        return cfg if cfg.isdigit() else "0"
+
+    async def _fetch_present_users(self, qqid: str = ""):
+        """调用统一 Bot API 获取在店用户。
+
+        成功返回 (users, None)；失败返回 (None, 失败结果 dict)。
+        """
+        urls, fallback_ips, timeout, key = self._api_config()
+        if not key:
+            return None, {"ok": False, "error": "NO_KEY", "message": "未配置 Bot 明钥"}
+        result = await bot_action(
+            urls, fallback_ips, timeout, key, qqid or self._api_qqid(), "getPresentUsers", ""
+        )
+        if not result.get("ok"):
+            return None, result
+        users = parse_present_users(result.get("data"))
+        if users is None:
+            return None, {"ok": False, "error": "BAD_DATA", "message": "返回数据格式异常"}
+        return users, None
+
+    # ------------------------------------------------------------------
     # 状态推送
     # ------------------------------------------------------------------
     async def _status_loop(self) -> None:
@@ -288,17 +290,17 @@ class DcsWhosinPlugin(Star):
     async def _status_tick(self, first: bool) -> None:
         """检查一次站点状态；smart 模式只在启动、异常/恢复与心跳时推送。"""
         mode = str(self.config.get("status_push_mode", "smart") or "smart")
-        result = await self._fetch_data()
-        healthy = not result.error
+        users, err = await self._fetch_present_users()
+        healthy = users is not None
+        err_detail = ""
         if healthy:
-            groups = classify_users(result.users)
-            venue_line = (
-                f"在店：{len(groups.players) + len(groups.staff_line)} 人"
-                f"（玩家 {len(groups.players)} / 管理 {len(groups.staff_line)}）"
-            )
+            players = [u for u in users if u.get("role") == "player"]
+            others = [u for u in users if u.get("role") in ("staff", "admin")]
+            venue_line = f"在店：{len(users)} 人（玩家 {len(players)} / 管理 {len(others)}）"
         else:
-            venue_line = f"站点：异常（{public_error_text(result.error_kind)}）"
-            logger.warning(f"[dcs_whosin] 状态检查失败：{result.error}")
+            err_detail = f"{err.get('error')} {err.get('message') or ''}".strip()
+            venue_line = "站点：异常（接口访问失败）"
+            logger.warning(f"[dcs_whosin] 状态检查失败：{err_detail or '未知原因'}")
 
         event_name = None
         if mode == "interval":
@@ -325,9 +327,9 @@ class DcsWhosinPlugin(Star):
             "运行：在线正常",
             venue_line,
         ]
-        if not healthy and result.error:
+        if not healthy and err_detail:
             # 详情只推送给维护者，群内不展示
-            lines.append(f"详情：{result.error[:200]}")
+            lines.append(f"详情：{err_detail[:200]}")
         if first or self._adapter_patched is False:
             lines.append(f"适配器补丁：{patch_text}")
         await self._push_status("\n".join(lines))
@@ -360,28 +362,38 @@ class DcsWhosinPlugin(Star):
         await self._wait_group_slot(event)
 
         try:
-            result = await self._fetch_data()
+            qqid = str(event.get_sender_id() or "").strip()
+            users, err = await self._fetch_present_users(qqid)
 
-            # 抓取失败：群内只给通用提示，详细原因写日志
-            if result.error:
-                logger.warning(f"[dcs_whosin] 查询失败：{result.error}")
-                yield event.plain_result(f"查询失败：{public_error_text(result.error_kind)}")
+            # 接口失败：群内只给通用提示，详细原因写日志
+            if users is None:
+                logger.warning(f"[dcs_whosin] 查询失败：{err.get('error')} {err.get('message') or ''}")
+                yield event.plain_result(f"查询失败：{public_api_error(err)}")
                 return
 
-            groups = classify_users(result.users)
+            players = [u for u in users if u.get("role") == "player"]
+            staff_line = [u for u in users if u.get("role") in ("staff", "admin")]
+            # 管理在前、士大夫在后（与旧版展示一致）
+            staff_line.sort(key=lambda u: 0 if u.get("role") == "admin" else 1)
 
             # 重要规则：玩家数量为 0（只有管理员/士大夫或完全无人）时，
             # 不发送空信息，统一发送指定提示文案
-            if not groups.players:
+            if not players:
                 yield event.plain_result(EMPTY_PLAYER_MESSAGE)
                 return
 
-            text = format_text_message(groups)
+            text_lines = [f"玩家：{','.join(u['name'] for u in players)}"]
+            if staff_line:
+                text_lines.append(f"管理/STAFF：{','.join(u['name'] for u in staff_line)}")
+            text = "\n".join(text_lines)
+
             if not self.config.get("enable_image", True):
                 yield event.plain_result(text)
                 return
 
-            image_path = await self._render_image(groups, result.source_url)
+            urls, _fallback_ips, _timeout, _key = self._api_config()
+            source_host = urlsplit(urls[0]).netloc if urls else ""
+            image_path = await self._render_image(players, staff_line, source_host)
             if image_path:
                 # 图片 + 文本合并为一条消息发送
                 yield event.chain_result(
@@ -522,18 +534,25 @@ class DcsWhosinPlugin(Star):
             cutoff = now - max(cooldown, 60) * 2
             self._bind_last = {k: v for k, v in self._bind_last.items() if v >= cutoff}
 
-        urls, fallback_ips, timeout, _cookie, _user, _password = self._site_targets()
+        urls, fallback_ips, timeout, key = self._api_config()
+        if not key:
+            yield event.plain_result("机器人还没配置 Bot 明钥，请联系维护者")
+            return
         result = None
         try:
-            result = await call_qq_bind_verify(urls, fallback_ips, timeout, qq, code)
+            result = await bot_action(urls, fallback_ips, timeout, key, qq, "bindQq", code)
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[dcs_whosin] /bd 绑定请求异常：{exc!r}")
-        if isinstance(result, dict) and result.get("success"):
-            logger.info(f"[dcs_whosin] /bd 绑定成功：QQ={qq}")
+        if isinstance(result, dict) and result.get("ok"):
+            data = result.get("data") or {}
+            message = str(data.get("message") or "") if isinstance(data, dict) else ""
+            logger.info(f"[dcs_whosin] /bd 绑定结果：QQ={qq} 站点消息={message}")
         else:
-            err = result.get("error") if isinstance(result, dict) else "网络失败"
+            err = result.get("error") if isinstance(result, dict) else "network"
             logger.info(f"[dcs_whosin] /bd 绑定未成功：QQ={qq} 原因={err}")
-        yield event.plain_result(format_bind_reply(result, qq))
+        yield event.plain_result(
+            format_bind_reply(result if isinstance(result, dict) else {"ok": False, "error": "network"}, qq)
+        )
 
     # ------------------------------------------------------------------
     # 静默策略：私聊开关 / 群白名单 / 频率限制
@@ -596,26 +615,18 @@ class DcsWhosinPlugin(Star):
     # ------------------------------------------------------------------
     # 内部辅助
     # ------------------------------------------------------------------
-    async def _fetch_data(self):
-        """按插件配置抓取在店数据。"""
-        urls = self.config.get("target_urls", DEFAULT_TARGET_URLS)
-        if isinstance(urls, str):  # 兼容用户把地址配置成单个字符串的情况
-            urls = [urls]
-        fallback_ips = _as_list(self.config.get("fallback_ips", DEFAULT_FALLBACK_IPS))
-        timeout = int(self.config.get("timeout_seconds", 10) or 10)
-        cookie = str(self.config.get("cookie", "") or "")
-        username = str(self.config.get("login_username", "") or "")
-        password = str(self.config.get("login_password", "") or "")
-        return await fetch_whosin_users(
-            urls=urls,
-            timeout=timeout,
-            cookie=cookie,
-            username=username,
-            password=password,
-            fallback_ips=fallback_ips,
-        )
+    @staticmethod
+    def _render_entry(user: dict) -> dict:
+        """把在店用户转换为渲染模板需要的条目（入店时间按 FLT 显示）。"""
+        entered_ms = user.get("entered_ms")
+        entered_text = ""
+        minutes = None
+        if entered_ms:
+            entered_text = datetime.fromtimestamp(int(entered_ms) / 1000, FLT).strftime("%H:%M")
+            minutes = max(0, int((time.time() * 1000 - int(entered_ms)) // 60000))
+        return {"name": user.get("name") or "", "entered": entered_text, "minutes": minutes}
 
-    async def _render_image(self, groups, source_url: str) -> str | None:
+    async def _render_image(self, players, staff_line, source_host: str) -> str | None:
         """在本机渲染在店一览图片，返回 PNG 路径；渲染失败时返回 None。"""
         now = datetime.now(FLT)
         ttl = int(self.config.get("cache_ttl_seconds", 30) or 0)
@@ -624,12 +635,12 @@ class DcsWhosinPlugin(Star):
         payload = {
             "time_text": now.strftime("%Y-%m-%d %H:%M"),
             "weekday_text": "周" + "一二三四五六日"[now.weekday()],
-            "players": groups.players,
-            "staff_line": groups.staff_line,
-            "player_count": len(groups.players),
-            "staff_count": len(groups.staff_line),
-            "total_count": len(groups.players) + len(groups.staff_line),
-            "source_host": source_url.split("//")[-1].split("/")[0] if source_url else "",
+            "players": [self._render_entry(u) for u in players],
+            "staff_line": [self._render_entry(u) for u in staff_line],
+            "player_count": len(players),
+            "staff_count": len(staff_line),
+            "total_count": len(players) + len(staff_line),
+            "source_host": source_host,
         }
         return await self.renderer.render(
             payload,
@@ -670,11 +681,6 @@ class DcsWhosinPlugin(Star):
                     except (TypeError, ValueError):
                         pass
                     ledger[str(k)] = rec
-            if str(data.get("mode") or "snapshot") == "records":
-                if isinstance(seen, dict):
-                    self._presence_mode = "records"
-                    logger.info(f"[dcs_whosin] 已恢复进离店去重状态（{len(seen)} 条）")
-                return
             ttl_minutes = int(self.config.get("presence_state_ttl_minutes", 15) or 0)
             users = data.get("users")
             if (
@@ -696,12 +702,10 @@ class DcsWhosinPlugin(Star):
             path = self._presence_state_file()
             temp = path.with_suffix(".tmp")
             payload = {
-                "mode": self._presence_mode,
                 "saved_at": time.time(),
                 "seen": self._ledger_seen(),
+                "users": self._presence,
             }
-            if self._presence_mode != "records":
-                payload["users"] = self._presence
             temp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
             temp.replace(path)
         except Exception as exc:  # noqa: BLE001
@@ -724,79 +728,76 @@ class DcsWhosinPlugin(Star):
             await asyncio.sleep(interval)
 
     async def _presence_tick(self, interval: int) -> None:
-        """进离店检查：优先访问记录流（无盲区），不可用时自动退回在店快照。"""
-        if self._presence_mode == "records":
-            if await self._presence_tick_records(interval):
-                return
-            if self._records_fail_count < 5:
-                return  # 短暂故障：等下一轮立即重试，避免与快照重复播报
-            self._presence_mode = "snapshot"
-            self._presence_ready = False
-            logger.warning(
-                "[dcs_whosin] 访问记录接口持续不可用，已退回在店快照模式（每 10 分钟自动重试记录接口）"
-            )
-        else:
-            self._records_tick_counter += 1
-            if self._records_fail_count == 0 or self._records_tick_counter % 20 == 0:
-                if await self._presence_tick_records(interval):
-                    return
-        await self._presence_tick_snapshot(interval)
-
-    async def _presence_tick_records(self, interval: int) -> bool:
-        """用站点访问记录流做进离店播报（无盲区、扣费为真实结算金额）；失败返回 False。"""
-        urls = self.config.get("target_urls", DEFAULT_TARGET_URLS)
-        if isinstance(urls, str):
-            urls = [urls]
-        base_url = str(self.config.get("presence_visits_url", "") or "").strip()
-        if not base_url:
-            base = urls[0] if urls else DEFAULT_TARGET_URLS[0]
-            parts = urlsplit(base)
-            base_url = f"{parts.scheme}://{parts.netloc}/api/visits/recent"
-        url = f"{base_url}{'&' if '?' in base_url else '?'}limit=200"
-        fallback_ips = _as_list(self.config.get("fallback_ips", DEFAULT_FALLBACK_IPS))
-        timeout = int(self.config.get("timeout_seconds", 10) or 10)
-        text = None
-        try:
-            text = await fetch_visits_text(
-                [url],
-                fallback_ips,
-                timeout,
-                str(self.config.get("cookie", "") or ""),
-                str(self.config.get("login_username", "") or ""),
-                str(self.config.get("login_password", "") or ""),
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(f"[dcs_whosin] 访问记录接口请求失败：{exc!r}")
-        visits = parse_visits_payload(text) if text else None
-        if visits is None:
-            self._records_fail_count += 1
-            if self._records_fail_count == 1 and self._presence_mode != "records":
-                logger.info(
-                    "[dcs_whosin] 站点访问记录接口暂不可用，继续使用在店快照模式"
-                    "（站点端接口上线后会自动切换，无需重启）"
-                )
-            return False
-        self._records_fail_count = 0
-        if self._presence_mode != "records":
-            self._presence_mode = "records"
-            logger.info("[dcs_whosin] 已启用访问记录模式（进离店无盲区，扣费为站点实际结算金额）")
-        self._ledger_seen()  # 确保统一去重表已初始化
+        """轮询统一 Bot API 的在店名单，差分播报进/离店。"""
+        users, err = await self._fetch_present_users()
+        if users is None:
+            logger.warning(f"[dcs_whosin] 进离店检查失败：{err.get('error')} {err.get('message') or ''}")
+            return
         now_ms = int(time.time() * 1000)
-        fresh_minutes = int(self.config.get("presence_record_fresh_minutes", 10) or 10)
+        current = {item["key"]: dict(item, last_seen_ms=now_ms) for item in users}
+
+        if not self._presence_ready:
+            self._presence = current
+            self._presence_ready = True
+            self._save_presence_state()
+            logger.info(f"[dcs_whosin] 进离店基线已建立（{len(current)} 人，不播报存量玩家）")
+            return
+
+        previous = self._presence
+        entries = [
+            user for key, user in current.items()
+            if key not in previous and user.get("role") == "player"
+        ]
+        exits = [
+            user for key, user in previous.items()
+            if key not in current and user.get("role") == "player"
+        ]
+
         prefix = str(self.config.get("presence_prefix", "【Kanade】") or "")
-        pricing = await self._get_pricing("")
-        messages, new_state = process_visit_records(
-            self._records_state, visits, now_ms, fresh_minutes, prefix, pricing
-        )
-        self._records_state = new_state
+        messages: list[str] = []
+        for user in entries:
+            key = visit_key(user.get("id"), user.get("entered_ms"))
+            record = self._ledger_get(key)
+            if record.get("e"):
+                continue  # 其它通道（自助离店等）已记录过进店
+            messages.append(f"{prefix}{user.get('name', '')}进店了")
+            self._ledger_mark(key, e=1, at=user.get("entered_ms"))
+        for user in exits:
+            entered_ms = user.get("entered_ms")
+            if not entered_ms:
+                logger.warning(f"[dcs_whosin] {user.get('name', '')} 离店但缺少入店时间，跳过播报")
+                continue
+            key = visit_key(user.get("id"), entered_ms)
+            record = self._ledger_get(key)
+            if record.get("x"):
+                continue  # 自助离店已播报过（避免重复）
+            last_seen = int(user.get("last_seen_ms") or now_ms)
+            gap = max(0, now_ms - last_seen)
+            # 真实离店发生在（最后在店, 本次发现]之间，取中点降低误差
+            settle_ms = last_seen + min(gap, interval * 1000) // 2
+            # 游玩时长向上取整（不足 1 分钟按 1 分钟计）
+            minutes = max(0, math.ceil((settle_ms - int(entered_ms)) / 60000))
+            pricing = await self._get_pricing("")
+            try:
+                multiplier = float(user.get("multiplier")) if user.get("multiplier") is not None else 1.0
+            except (TypeError, ValueError):
+                multiplier = 1.0
+            fee_fen = calculate_charge_fen(int(entered_ms), settle_ms, pricing, multiplier)
+            messages.append(
+                f"{prefix}{user.get('name', '')}离店了\n"
+                f"游玩{minutes}分钟\n"
+                f"扣费{format_fee_yuan(fee_fen)}元（线上余额）"
+            )
+            self._ledger_mark(key, e=1, x=1, at=int(entered_ms))
+
+        self._presence = current
         self._save_presence_state()
         await self._broadcast_presence(messages)
-        return True
 
     def _ledger_seen(self) -> dict:
         """统一去重表：{"用户ID:进店毫秒": {"e": 进店已播, "x": 离店已播, "at": 进店时间}}。
 
-        Webhook、访问记录流与在店快照三种通道共用，确保任何事件只播报一次。
+        轮询播报与自助离店共用，确保任何事件只记一次。
         """
         if self._records_state is None:
             self._records_state = {"seen": {}}
@@ -827,144 +828,6 @@ class DcsWhosinPlugin(Star):
             except (TypeError, ValueError):
                 pass
         seen[key] = record
-
-    async def _on_webhook_event(self, payload: dict) -> None:
-        """处理站点 webhook 事件：进店/离店实时播报（与轮询通道共用统一去重表）。"""
-        if not self.config.get("presence_notify_enable", False):
-            return
-        event = str(payload.get("event") or "").strip().lower()
-        if event not in ("enter", "leave"):
-            return
-        name = str(payload.get("nickname") or "").strip()
-        role = map_role(payload.get("role"))
-        uid = payload.get("userId")
-        entered = payload.get("enteredAt")
-        if not name or role != "player" or uid is None or entered is None:
-            return
-        try:
-            entered_ms = int(entered)
-        except (TypeError, ValueError):
-            return
-
-        key = visit_key(uid, entered_ms)
-        now_ms = int(time.time() * 1000)
-        fresh_minutes = int(self.config.get("presence_record_fresh_minutes", 10) or 10)
-        fresh_ms = max(1, fresh_minutes) * 60000
-        prefix = str(self.config.get("presence_prefix", "【Kanade】") or "")
-        record = self._ledger_get(key)
-        messages: list[str] = []
-
-        if event == "enter":
-            if not record.get("e"):
-                if now_ms - entered_ms <= fresh_ms:
-                    messages.append(f"{prefix}{name}进店了")
-                self._ledger_mark(key, e=1, at=entered_ms)
-        else:
-            left = payload.get("leftAt")
-            try:
-                left_ms = int(left) if left is not None else now_ms
-            except (TypeError, ValueError):
-                left_ms = now_ms
-            if not record.get("e"):
-                if now_ms - entered_ms <= fresh_ms:
-                    messages.append(f"{prefix}{name}进店了")
-            if not record.get("x"):
-                if now_ms - left_ms <= fresh_ms:
-                    charge = payload.get("charge")
-                    if charge is None:
-                        try:
-                            multiplier = float(payload.get("chargeMultiplier")) if payload.get("chargeMultiplier") is not None else 1.0
-                        except (TypeError, ValueError):
-                            multiplier = 1.0
-                        try:
-                            pass_multiplier = float(payload.get("passMultiplier")) if payload.get("passMultiplier") is not None else 1.0
-                        except (TypeError, ValueError):
-                            pass_multiplier = 1.0
-                        pricing = await self._get_pricing("")
-                        charge = calculate_charge_fen(
-                            entered_ms, left_ms, pricing, abs(multiplier) * abs(pass_multiplier)
-                        )
-                    minutes = max(0, math.ceil((left_ms - entered_ms) / 60000))
-                    messages.append(
-                        f"{prefix}{name}离店了\n"
-                        f"游玩{minutes}分钟\n"
-                        f"扣费{format_fee_yuan(charge or 0)}元（线上余额）"
-                    )
-            self._ledger_mark(key, e=1, x=1, at=entered_ms)
-
-        self._save_presence_state()
-        if messages:
-            logger.info(f"[dcs_whosin] Webhook({event}) 已播报 {name}")
-        await self._broadcast_presence(messages)
-
-    async def _presence_tick_snapshot(self, interval: int) -> None:
-        result = await self._fetch_data()
-        if result.error or not result.raw_html:
-            logger.warning(f"[dcs_whosin] 进离店检查失败：{result.error_kind or '未获取到页面'}")
-            return
-        snapshot = parse_whosin_snapshot(result.raw_html)
-        if snapshot is None:
-            snapshot = snapshot_from_users(result.users)
-        now_ms = int(time.time() * 1000)
-        current = {item["key"]: dict(item, last_seen_ms=now_ms) for item in snapshot}
-
-        if not self._presence_ready:
-            self._presence = current
-            self._presence_ready = True
-            self._save_presence_state()
-            logger.info(f"[dcs_whosin] 进离店基线已建立（{len(current)} 人，不播报存量玩家）")
-            return
-
-        previous = self._presence
-        entries = [
-            user for key, user in current.items()
-            if key not in previous and user.get("role") == "player"
-        ]
-        exits = [
-            user for key, user in previous.items()
-            if key not in current and user.get("role") == "player"
-        ]
-
-        prefix = str(self.config.get("presence_prefix", "【Kanade】") or "")
-        messages: list[str] = []
-        for user in entries:
-            key = visit_key(user.get("id"), user.get("entered_ms"))
-            record = self._ledger_get(key)
-            if record.get("e"):
-                continue  # Webhook / 记录流已播报过进店
-            messages.append(f"{prefix}{user.get('name', '')}进店了")
-            self._ledger_mark(key, e=1, at=user.get("entered_ms"))
-        for user in exits:
-            entered_ms = user.get("entered_ms")
-            if not entered_ms:
-                logger.warning(f"[dcs_whosin] {user.get('name', '')} 离店但缺少入店时间，跳过播报")
-                continue
-            key = visit_key(user.get("id"), entered_ms)
-            record = self._ledger_get(key)
-            if record.get("x"):
-                continue  # Webhook / 记录流已播报过离店
-            last_seen = int(user.get("last_seen_ms") or now_ms)
-            gap = max(0, now_ms - last_seen)
-            # 真实离店发生在（最后在店, 本次发现]之间，取中点降低误差
-            settle_ms = last_seen + min(gap, interval * 1000) // 2
-            # 游玩时长向上取整（不足 1 分钟按 1 分钟计）
-            minutes = max(0, math.ceil((settle_ms - int(entered_ms)) / 60000))
-            pricing = await self._get_pricing(result.source_url)
-            try:
-                multiplier = float(user.get("multiplier")) if user.get("multiplier") is not None else 1.0
-            except (TypeError, ValueError):
-                multiplier = 1.0
-            fee_fen = calculate_charge_fen(int(entered_ms), settle_ms, pricing, multiplier)
-            messages.append(
-                f"{prefix}{user.get('name', '')}离店了\n"
-                f"游玩{minutes}分钟\n"
-                f"扣费{format_fee_yuan(fee_fen)}元（线上余额）"
-            )
-            self._ledger_mark(key, e=1, x=1, at=int(entered_ms))
-
-        self._presence = current
-        self._save_presence_state()
-        await self._broadcast_presence(messages)
 
     async def _broadcast_presence(self, messages: list[str]) -> None:
         if not messages:
@@ -1099,7 +962,7 @@ class DcsWhosinPlugin(Star):
             logger.warning(f"[dcs_whosin] /mj 预取失败：{exc!r}")
 
     # ------------------------------------------------------------------
-    # @bot 自助上机
+    # @bot 自助离店
     # ------------------------------------------------------------------
     async def _attend_action(self, event: AstrMessageEvent, action: str) -> str:
         qq = str(event.get_sender_id() or "").strip()
@@ -1118,31 +981,10 @@ class DcsWhosinPlugin(Star):
 
         prefix = str(self.config.get("presence_prefix", "【Kanade】") or "")
         result = None
-        channel = ""
-        # 主方案：站点机器人接口（/api/bot/action，需站点已部署；返回精确业务结果）
-        api_result = None
         try:
-            api_result = await self._attend_leave_via_api(qq)
+            result = await self._attend_leave_via_snapshot(qq)
         except Exception as exc:  # noqa: BLE001
-            logger.warning(f"[dcs_whosin] @bot 自助离店（接口通道）异常：{exc!r}")
-        api_error = str(api_result.get("error") or "") if isinstance(api_result, dict) else ""
-        definitive = {"NOT_BOUND", "NOT_IN", "BAD_QQ", "BAD_ACTION"}
-        if isinstance(api_result, dict) and (api_result.get("success") or api_error in definitive):
-            result = api_result
-            channel = "接口"
-        else:
-            # 备用方案（无需站点更新）：在店快照按 QQ 绑定找账号 → 工作人员代离店
-            fallback_result = None
-            try:
-                fallback_result = await self._attend_leave_via_snapshot(qq)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(f"[dcs_whosin] @bot 自助离店（快照通道）异常：{exc!r}")
-            if fallback_result is not None:
-                result = fallback_result
-                channel = "本地"
-            else:
-                result = api_result  # 保留接口错误（或 None）用于提示
-                channel = "接口"
+            logger.warning(f"[dcs_whosin] @bot 自助离店异常：{exc!r}")
 
         text, meta = format_attend_reply(action, result, prefix)
         if meta and meta.get("key"):
@@ -1154,12 +996,12 @@ class DcsWhosinPlugin(Star):
             )
             self._save_presence_state()
         first_line = text.splitlines()[0] if text else ""
-        detail = f"通道={channel or '无'}"
+        detail = ""
         if result is None:
-            detail += " 站点请求失败"
+            detail = "站点请求失败"
         elif not result.get("success"):
-            detail += f" 站点错误={result.get('error')}"
-        logger.info(f"[dcs_whosin] @bot 自助（{action}）QQ={qq}：{first_line}（{detail}）")
+            detail = f"错误={result.get('error')}"
+        logger.info(f"[dcs_whosin] @bot 自助（{action}）QQ={qq}：{first_line}" + (f"（{detail}）" if detail else ""))
         return text
 
     def _site_targets(self):
@@ -1181,7 +1023,7 @@ class DcsWhosinPlugin(Star):
         return None
 
     async def _attend_leave_via_snapshot(self, qq: str) -> dict | None:
-        """通道一：/whosin 快照按 QQ 绑定找账号 → 工作人员代离店 → 取真实扣费。"""
+        """按 QQ 绑定找账号（统一 API 在店名单）→ 工作人员代离店 → 取真实扣费。"""
         snapshot = None
         now_ms = int(time.time() * 1000)
         if self._presence_ready and self._presence:
@@ -1190,14 +1032,11 @@ class DcsWhosinPlugin(Star):
                 snapshot = list(self._presence.values())
         match = self._find_snapshot_user(snapshot, qq)
         if match is None:
-            # 内存快照里没有（可能刚进店 / 快照太旧 / 状态文件来自旧版本）：现场抓一次
-            fetched = await self._fetch_data()
-            if fetched.error or not fetched.raw_html:
+            # 内存快照里没有（可能刚进店 / 快照太旧）：现场拉一次
+            users, _err = await self._fetch_present_users(qq)
+            if users is None:
                 return None
-            snapshot = parse_whosin_snapshot(fetched.raw_html)
-            if snapshot is None:
-                snapshot = snapshot_from_users(fetched.users)
-            match = self._find_snapshot_user(snapshot, qq)
+            match = self._find_snapshot_user(users, qq)
         if match is None or match.get("id") is None or not match.get("entered_ms"):
             return {"success": False, "error": "NOT_FOUND"}
 
@@ -1233,21 +1072,8 @@ class DcsWhosinPlugin(Star):
             "charge": charge,
         }
 
-    async def _attend_leave_via_api(self, qq: str) -> dict | None:
-        """通道二：调用站点 /api/bot/action（需站点已部署该接口）。"""
-        token = str(self.config.get("webhook_secret", "") or "")
-        if not token:
-            return {"success": False, "error": "NO_TOKEN"}
-        urls, fallback_ips, timeout, _c, _u, _p = self._site_targets()
-        base = urls[0] if urls else DEFAULT_TARGET_URLS[0]
-        parts = urlsplit(base)
-        action_url = f"{parts.scheme}://{parts.netloc}/api/bot/action"
-        return await call_bot_action([action_url], fallback_ips, timeout, token, "leave", qq)
-
     async def terminate(self):
-        """插件被卸载 / 停用时停止后台任务与 Webhook 服务，关闭本地浏览器并清理图片缓存。"""
-        if self._webhook is not None:
-            await self._webhook.stop()
+        """插件被卸载 / 停用时停止后台任务，关闭本地浏览器并清理图片缓存。"""
         for task in (self._status_task, self._deps_task, self._presence_task, self._mj_task):
             if task and not task.done():
                 task.cancel()

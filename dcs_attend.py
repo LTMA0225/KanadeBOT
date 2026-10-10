@@ -1,14 +1,12 @@
-"""音游窝 · @bot 自助离店支持模块（v2.6.0）。
+"""音游窝 · @bot 自助离店支持模块（v3.0.0）。
 
-玩家在群里发 "@机器人 离店" 时，机器人用发送者的 QQ 号完成自助离店，**纯机器人实现、无需站点更新**：
+玩家在群里发 "@机器人 离店" 时，机器人用发送者的 QQ 号完成自助离店：
 
-- 通道一（默认立即可用）：读取 /whosin 数据中的 QQ 绑定（qqid）找到账号，
-  调用站点已有的工作人员接口 /api/forceleave 代为离店结算（机器人账号有工作人员权限）；
-  离店后从来店记录页读取**真实扣费金额**。
-- 通道二（站点部署机器人接口后自动启用，作为兜底与更精确的错误提示）：/api/bot/action。
+- 在店名单来自统一 Bot API（getPresentUsers），按 QQ 绑定（qqid）找到账号；
+- 调用站点工作人员接口 /api/forceleave 代为离店结算（机器人账号有工作人员权限）；
+- 离店后从来店记录页读取**真实扣费金额**（读取失败时按价目表本地估算兜底）。
 
 出于风险控制，只支持离店，不支持机器人进店。
-令牌与 webhook 共用（通道二使用，请求头 X-DCS-Token = 站点 .env 的 DCS_WEBHOOK_TOKEN）。
 本模块不依赖 astrbot；格式化与解析函数为纯函数，便于离线测试。
 """
 
@@ -24,50 +22,6 @@ try:
     from .dcs_presence import format_fee_yuan, visit_key
 except ImportError:  # pragma: no cover - 目录导入方式
     from dcs_presence import format_fee_yuan, visit_key
-
-
-async def call_bot_action(
-    urls: List[str],
-    fallback_ips: List[str],
-    timeout: int,
-    token: str,
-    action: str,
-    qq: str,
-) -> Optional[Dict[str, Any]]:
-    """调用站点 /api/bot/action；网络失败返回 None（调用方给通用提示）。"""
-    import aiohttp
-
-    try:
-        from . import dcs_api as api  # type: ignore
-    except ImportError:  # pragma: no cover - 目录导入方式
-        import dcs_api as api  # type: ignore
-
-    for route in api._build_routes(list(urls), list(fallback_ips or [])):
-        if not route.secure:
-            continue
-        url = route.origin + "/api/bot/action"
-        try:
-            timeout_cfg = aiohttp.ClientTimeout(total=max(3, int(timeout)))
-            async with aiohttp.ClientSession(timeout=timeout_cfg) as session:
-                async with api._request(
-                    session,
-                    "POST",
-                    url,
-                    route.connect_ip,
-                    json={"action": action, "qq": qq},
-                    headers={"User-Agent": api.USER_AGENT, "X-DCS-Token": token},
-                ) as resp:
-                    body_text = await resp.text()
-                    try:
-                        data = json.loads(body_text) if body_text else None
-                    except Exception:  # noqa: BLE001 - 非 JSON（如 404 页面）
-                        data = None
-                    if isinstance(data, dict):
-                        return data
-                    return {"success": False, "error": f"HTTP_{resp.status}"}
-        except Exception:  # noqa: BLE001 - 换下一条线路
-            continue
-    return None
 
 
 _VISIT_ROW = re.compile(
