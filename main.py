@@ -48,6 +48,14 @@ try:
         is_valid_bind_code,
         normalize_bind_code,
     )
+    from .dcs_booking import (
+        active_bookings,
+        format_booking_confirm,
+        format_booking_notice,
+        format_window,
+        parse_booking,
+        prune_bookings,
+    )
     from .dcs_botapi import bot_action, parse_present_users, public_api_error
     from .dcs_api import (
         DEFAULT_FALLBACK_IPS,
@@ -83,6 +91,14 @@ except ImportError:  # pragma: no cover - 取决于运行环境
         format_bind_reply,
         is_valid_bind_code,
         normalize_bind_code,
+    )
+    from dcs_booking import (
+        active_bookings,
+        format_booking_confirm,
+        format_booking_notice,
+        format_window,
+        parse_booking,
+        prune_bookings,
     )
     from dcs_botapi import bot_action, parse_present_users, public_api_error
     from dcs_api import (
@@ -169,6 +185,7 @@ class DcsWhosinPlugin(Star):
         self._mj_task: asyncio.Task | None = None  # /mj 表情预取任务
         self._attend_last: dict[str, float] = {}  # @bot 自助离店冷却
         self._bind_last: dict[str, float] = {}  # /bd QQ绑定冷却
+        self._bookings: list[dict] = []  # 包场（包机）记录
         self._pricing: dict | None = None
         self._pricing_at = 0.0
         self._pricing_default_logged = False
@@ -196,6 +213,7 @@ class DcsWhosinPlugin(Star):
         if self._deps_task is None or self._deps_task.done():
             self._deps_task = asyncio.create_task(self._ensure_render_dependencies())
         self._load_presence_state()
+        self._load_bookings()
         if self._presence_task is None or self._presence_task.done():
             self._presence_task = asyncio.create_task(self._presence_loop())
             logger.info("[dcs_whosin] 进离店播报任务已启动。")
@@ -360,6 +378,15 @@ class DcsWhosinPlugin(Star):
                 yield event.plain_result(notice)
             return
         await self._wait_group_slot(event)
+
+        # 包场时段：只提示包场，不返回在店名单
+        if self.config.get("booking_enable", True):
+            active = active_bookings(self._bookings)
+            if active:
+                prefix = str(self.config.get("presence_prefix", "【Kanade】") or "")
+                logger.info(f"[dcs_whosin] /j 命中包场提示（{len(active)} 条）")
+                yield event.plain_result(format_booking_notice(active, prefix))
+                return
 
         try:
             qqid = str(event.get_sender_id() or "").strip()
@@ -555,6 +582,72 @@ class DcsWhosinPlugin(Star):
         )
 
     # ------------------------------------------------------------------
+    # 指令：包场（包机）登记 / 取消（仅群主、管理员或 booking_admins）
+    # ------------------------------------------------------------------
+    @filter.regex(r"^包(?:机|场)\s*\S")
+    async def booking_add(self, event: AstrMessageEvent):
+        """登记包场：@机器人 包场 舞萌 10日14时~16时"""
+        if not event.is_at_or_wake_command:
+            return
+        if not self.config.get("booking_enable", True):
+            return
+        if not self._policy_allows(event):
+            return
+        if not await self._is_booking_admin(event):
+            yield event.plain_result("只有群主/管理员可以登记包场哦")
+            return
+        booking, error = parse_booking(event.get_message_str().strip())
+        if booking is None:
+            yield event.plain_result(error or "格式不对")
+            return
+        booking["by"] = str(event.get_sender_id() or "")
+        booking["created_ms"] = int(time.time() * 1000)
+        self._bookings = prune_bookings(self._bookings)
+        self._bookings.append(booking)
+        self._save_bookings()
+        logger.info(
+            f"[dcs_whosin] 包场登记：{booking.get('machine')} "
+            f"{booking.get('start_ms')}~{booking.get('end_ms')}"
+        )
+        yield event.plain_result(format_booking_confirm(booking))
+
+    @filter.regex(r"^取消包(?:机|场)")
+    async def booking_cancel(self, event: AstrMessageEvent):
+        """取消包场：@机器人 取消包场 [机台关键词]"""
+        if not event.is_at_or_wake_command:
+            return
+        if not self.config.get("booking_enable", True):
+            return
+        if not self._policy_allows(event):
+            return
+        if not await self._is_booking_admin(event):
+            yield event.plain_result("只有群主/管理员可以取消包场哦")
+            return
+        keyword = re.sub(r"^取消包(?:机|场)\s*", "", event.get_message_str().strip()).strip()
+        now_ms = int(time.time() * 1000)
+        future = [b for b in self._bookings if int(b.get("end_ms") or 0) > now_ms]
+        if keyword:
+            removed = [b for b in future if keyword in str(b.get("machine") or "")]
+        else:
+            removed = list(future)
+        if not removed:
+            suffix = f"（关键词：{keyword}）" if keyword else ""
+            yield event.plain_result("没有找到可取消的包场" + suffix)
+            return
+        removed_ids = {id(b) for b in removed}
+        self._bookings = prune_bookings([b for b in self._bookings if id(b) not in removed_ids])
+        self._save_bookings()
+        lines = [f"已取消 {len(removed)} 条包场："]
+        for b in removed:
+            try:
+                window = format_window(int(b.get("start_ms") or 0), int(b.get("end_ms") or 0))
+            except (TypeError, ValueError):
+                window = ""
+            lines.append(f"· {b.get('machine', '')} {window}")
+        logger.info(f"[dcs_whosin] 包场取消：{len(removed)} 条（关键词={keyword or '全部'}）")
+        yield event.plain_result("\n".join(lines))
+
+    # ------------------------------------------------------------------
     # 静默策略：私聊开关 / 群白名单 / 频率限制
     # ------------------------------------------------------------------
     def _policy_allows(self, event: AstrMessageEvent) -> bool:
@@ -611,6 +704,64 @@ class DcsWhosinPlugin(Star):
         self._group_next_slot[group_id] = slot + interval
         if slot > now:
             await asyncio.sleep(slot - now)
+
+    # ------------------------------------------------------------------
+    # 包场（包机）记录
+    # ------------------------------------------------------------------
+    def _booking_file(self) -> Path:
+        return self.plugin_data_dir / "bookings.json"
+
+    def _load_bookings(self) -> None:
+        try:
+            path = self._booking_file()
+            if not path.exists():
+                return
+            data = json.loads(path.read_text(encoding="utf-8"))
+            items = data.get("bookings") if isinstance(data, dict) else None
+            if not isinstance(items, list):
+                return
+            cleaned = prune_bookings([b for b in items if isinstance(b, dict)])
+            self._bookings = cleaned
+            if len(cleaned) != len(items):
+                self._save_bookings()
+            if self._bookings:
+                logger.info(f"[dcs_whosin] 已恢复 {len(self._bookings)} 条包场记录")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[dcs_whosin] 包场记录恢复失败：{exc!r}")
+
+    def _save_bookings(self) -> None:
+        try:
+            self.plugin_data_dir.mkdir(parents=True, exist_ok=True)
+            path = self._booking_file()
+            temp = path.with_suffix(".tmp")
+            temp.write_text(json.dumps({"bookings": self._bookings}, ensure_ascii=False), encoding="utf-8")
+            temp.replace(path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[dcs_whosin] 包场记录保存失败：{exc!r}")
+
+    async def _is_booking_admin(self, event: AstrMessageEvent) -> bool:
+        """群主/管理员，或配置 booking_admins 中的 QQ，才可管理包场。"""
+        qq = str(event.get_sender_id() or "").strip()
+        if not qq.isdigit():
+            return False
+        if qq in _as_list(self.config.get("booking_admins")):
+            return True
+        bot = getattr(event, "bot", None)
+        group_id = str(event.get_group_id() or "").strip()
+        if bot is None or not group_id.isdigit():
+            return False
+        try:
+            info = await bot.call_action(
+                "get_group_member_info",
+                group_id=int(group_id),
+                user_id=int(qq),
+                no_cache=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[dcs_whosin] 查询群成员身份失败：{exc!r}")
+            return False
+        role = str((info or {}).get("role") or "")
+        return role in ("owner", "admin")
 
     # ------------------------------------------------------------------
     # 内部辅助
