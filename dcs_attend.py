@@ -1,14 +1,3 @@
-"""音游窝 · @bot 自助离店支持模块（v3.0.0）。
-
-玩家在群里发 "@机器人 离店" 时，机器人用发送者的 QQ 号完成自助离店：
-
-- 在店名单来自统一 Bot API（getPresentUsers），按 QQ 绑定（qqid）找到账号；
-- 调用站点工作人员接口 /api/forceleave 代为离店结算（机器人账号有工作人员权限）；
-- 离店后从来店记录页读取**真实扣费金额**（读取失败时按价目表本地估算兜底）。
-
-出于风险控制，只支持离店，不支持机器人进店。
-本模块不依赖 astrbot；格式化与解析函数为纯函数，便于离线测试。
-"""
 
 from __future__ import annotations
 
@@ -20,18 +9,15 @@ from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from .dcs_presence import format_fee_yuan, visit_key
-except ImportError:  # pragma: no cover - 目录导入方式
+except ImportError:
     from dcs_presence import format_fee_yuan, visit_key
-
 
 _VISIT_ROW = re.compile(
     r'<div class="visitListing">\s*<p>([^<]*)</p>\s*<p>([^<]*)</p>\s*<p>([^<]*)</p>',
     re.S,
 )
 
-
 def money_text_to_fen(text: str) -> Optional[int]:
-    """把站点金额文案（¥15.75 / ¥1.5万 / −¥3.00）转成分；无金额返回 None。"""
     raw = str(text or "").strip()
     if not raw or raw in ("-", "—"):
         return None
@@ -46,16 +32,13 @@ def money_text_to_fen(text: str) -> Optional[int]:
         return None
     return -value if negative else value
 
-
 def parse_latest_charge_fen(html: str) -> Optional[int]:
-    """从来店记录页解析最新一条（第一行）的扣费金额（分）。"""
     if not html:
         return None
     match = _VISIT_ROW.search(html)
     if not match:
         return None
     return money_text_to_fen(match.group(3))
-
 
 async def call_force_leave(
     urls: List[str],
@@ -66,13 +49,12 @@ async def call_force_leave(
     password: str,
     user_id: int,
 ) -> Optional[Dict[str, Any]]:
-    """用机器人（工作人员）会话调用站点 /api/forceleave 代为离店；网络失败返回 None。"""
     import aiohttp
 
     try:
-        from . import dcs_api as api  # type: ignore
-    except ImportError:  # pragma: no cover - 目录导入方式
-        import dcs_api as api  # type: ignore
+        from . import dcs_api as api
+    except ImportError:
+        import dcs_api as api
 
     for route in api._build_routes(list(urls), list(fallback_ips or [])):
         if not route.secure:
@@ -96,15 +78,14 @@ async def call_force_leave(
                     body_text = await resp.text()
                     try:
                         data = json.loads(body_text) if body_text else None
-                    except Exception:  # noqa: BLE001 - 非 JSON（如 500 页面）
+                    except Exception:
                         data = None
                     if isinstance(data, dict):
                         return data
                     return {"success": False, "error": f"HTTP_{resp.status}"}
-        except Exception:  # noqa: BLE001 - 换下一条线路
+        except Exception:
             continue
     return None
-
 
 async def fetch_latest_charge_fen(
     urls: List[str],
@@ -115,13 +96,12 @@ async def fetch_latest_charge_fen(
     password: str,
     user_id: int,
 ) -> Optional[int]:
-    """抓取用户来店记录页，返回最新一条的扣费（分）；失败返回 None。"""
     import aiohttp
 
     try:
-        from . import dcs_api as api  # type: ignore
-    except ImportError:  # pragma: no cover - 目录导入方式
-        import dcs_api as api  # type: ignore
+        from . import dcs_api as api
+    except ImportError:
+        import dcs_api as api
 
     for route in api._build_routes(list(urls), list(fallback_ips or [])):
         if not route.secure:
@@ -138,19 +118,13 @@ async def fetch_latest_charge_fen(
                     if resp.status != 200:
                         continue
                     return parse_latest_charge_fen(await resp.text())
-        except Exception:  # noqa: BLE001 - 换下一条线路
+        except Exception:
             continue
     return None
-
 
 def format_attend_reply(
     action: str, result: Optional[Dict[str, Any]], prefix: str = ""
 ) -> Tuple[str, Optional[Dict[str, Any]]]:
-    """把站点返回整理成 (回复文本, 记账信息)。
-
-    仅支持离店（leave）。记账信息 {"key","e","x","at"} 用于把该次离店写入统一去重表，
-    避免播报通道（Webhook/记录流/快照）再重复播报一次。
-    """
     if result is None:
         return "连接会馆网站失败，请稍后再试", None
 

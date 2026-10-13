@@ -1,9 +1,4 @@
 #!/usr/bin/env bash
-# ============================================================
-#  音游窝 QQ 机器人一键部署脚本（Linux / macOS）
-#  自动完成：安装 AstrBot 与本地渲染依赖、部署插件；并输出 NapCat 对接步骤
-#  依赖：Python 3.12+ / 网络可访问 PyPI 与 Playwright 下载源
-# ============================================================
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,7 +10,6 @@ echo "=========================================================="
 echo "  音游窝 QQ 机器人一键部署（AstrBot + NapCat）"
 echo "=========================================================="
 
-# ---------- [1/5] 检查 Python ----------
 if command -v python3 >/dev/null 2>&1; then
   PY=python3
 elif command -v python >/dev/null 2>&1; then
@@ -26,7 +20,6 @@ else
 fi
 echo "[1/5] 使用 Python：$($PY --version 2>&1)"
 
-# ---------- [2/5] 安装 / 更新 AstrBot ----------
 echo "[2/5] 安装 / 更新 AstrBot（pip 方式）..."
 $PY -m pip install --upgrade pip >/dev/null 2>&1 || true
 if ! $PY -m pip install --upgrade astrbot; then
@@ -34,7 +27,6 @@ if ! $PY -m pip install --upgrade astrbot; then
   $PY -m pip install --upgrade -i https://pypi.tuna.tsinghua.edu.cn/simple astrbot
 fi
 
-# ---------- [3/5] 安装本地渲染依赖 ----------
 echo "[3/5] 安装本地图片渲染依赖（jinja2 / playwright / Chromium）..."
 $PY -m pip install -r "$PLUGIN_ROOT/requirements.txt"
 if ! $PY -m playwright install chromium; then
@@ -43,7 +35,6 @@ fi
 echo "      提示：Linux 首次使用需安装浏览器运行库与中文字体，例如："
 echo "      sudo $PY -m playwright install-deps chromium && sudo apt-get install -y fonts-noto-cjk"
 
-# ---------- [4/5] 准备运行时目录并部署插件 ----------
 echo "[4/5] 部署插件到运行时目录..."
 mkdir -p "$RUNTIME/data/plugins"
 rm -rf "$RUNTIME/data/plugins/$PLUGIN_NAME"
@@ -57,7 +48,6 @@ else
          "$RUNTIME/data/plugins/$PLUGIN_NAME/__pycache__"
 fi
 
-# ---------- [5/5] 输出后续步骤 ----------
 cat <<'EOF'
 [5/5] 部署完成！后续步骤：
 

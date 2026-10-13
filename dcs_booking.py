@@ -1,12 +1,3 @@
-"""音游窝 · 包场（包机）管理模块（v3.1.0）。
-
-维护者（群主/管理员，或配置 booking_admins 中的 QQ）在群里 @机器人 发送
-"包机/包场 XXX机台 X日X时~X时" 即可登记包场；在包场时间段内，
-群内 /j 在店查询不再返回在店人数，而是提示本时段正有包场（包机）。
-
-支持写法：包机/包场、X月X日 或 今天/明天/后天、X时 或 X:XX、跨零点（22时~2时）。
-本模块不依赖 astrbot；解析与文案函数为纯函数，便于离线测试。
-"""
 
 from __future__ import annotations
 
@@ -35,19 +26,12 @@ _USAGE = (
     "（支持 包机/包场、X月X日 或 今天/明天/后天、X时 或 X:XX、可跨零点如 22时~2时）"
 )
 
-
 def _midnight_flt(year: int, month: int, day: int) -> int:
     return int(datetime(year, month, day, tzinfo=FLT).timestamp() * 1000)
-
 
 def parse_booking(
     text: str, now_ms: Optional[int] = None
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """解析包场登记文本。
-
-    返回 (booking, None) 或 (None, 错误说明)；
-    booking = {"kind": "机"|"场", "machine": str, "start_ms": int, "end_ms": int}
-    """
     raw = str(text or "").strip()
     match = _BOOKING_RE.match(raw)
     if not match:
@@ -80,7 +64,6 @@ def parse_booking(
             return None, f"{month}月没有{day}日"
         base = _midnight_flt(year, month, day)
         if base + 24 * 3600 * 1000 < now_ms:
-            # 日期已经过去：显式月份视为明年，隐式月份视为下个月
             if month_text:
                 year += 1
             else:
@@ -105,7 +88,7 @@ def parse_booking(
     start_ms = midnight + start_h * 3600000 + start_m * 60000
     end_ms = midnight + end_h * 3600000 + end_m * 60000
     if end_ms <= start_ms:
-        end_ms += 24 * 3600000  # 跨零点
+        end_ms += 24 * 3600000
     if end_ms - start_ms > _MAX_WINDOW_HOURS * 3600000:
         return None, "单次包场不能超过 24 小时"
 
@@ -116,11 +99,9 @@ def parse_booking(
         "end_ms": end_ms,
     }, None
 
-
 def active_bookings(
     bookings: List[Dict[str, Any]], now_ms: Optional[int] = None
 ) -> List[Dict[str, Any]]:
-    """返回当前时刻生效中的包场（start <= now < end）。"""
     now_ms = int(now_ms if now_ms is not None else time.time() * 1000)
     result: List[Dict[str, Any]] = []
     for item in bookings or []:
@@ -135,11 +116,9 @@ def active_bookings(
             result.append(item)
     return result
 
-
 def prune_bookings(
     bookings: List[Dict[str, Any]], now_ms: Optional[int] = None
 ) -> List[Dict[str, Any]]:
-    """清理已结束超过 24 小时的包场记录。"""
     now_ms = int(now_ms if now_ms is not None else time.time() * 1000)
     grace = 24 * 3600000
     return [
@@ -148,18 +127,14 @@ def prune_bookings(
         if isinstance(item, dict) and int(item.get("end_ms") or 0) >= now_ms - grace
     ]
 
-
 def format_window(start_ms: int, end_ms: int) -> str:
-    """把时间窗格式化为 "10日 14:00~16:00"（跨天时两端都带日期）。"""
     start = datetime.fromtimestamp(int(start_ms) / 1000, FLT)
     end = datetime.fromtimestamp(int(end_ms) / 1000, FLT)
     if start.date() == end.date():
         return f"{start.month}月{start.day}日 {start:%H:%M}~{end:%H:%M}"
     return f"{start.month}月{start.day}日 {start:%H:%M}~{end.month}月{end.day}日 {end:%H:%M}"
 
-
 def format_booking_notice(bookings: List[Dict[str, Any]], prefix: str = "") -> str:
-    """包场时段内 /j 的替代回复文案。"""
     lines = [f"{prefix}本时段正有包场（包机）"]
     for item in bookings or []:
         try:
@@ -170,9 +145,7 @@ def format_booking_notice(bookings: List[Dict[str, Any]], prefix: str = "") -> s
     lines.append("（期间不提供在店人数查询）")
     return "\n".join(lines)
 
-
 def format_booking_confirm(booking: Dict[str, Any]) -> str:
-    """登记成功的确认文案。"""
     kind_text = "包场" if str(booking.get("kind")) == "场" else "包机"
     window = format_window(int(booking.get("start_ms") or 0), int(booking.get("end_ms") or 0))
     return (

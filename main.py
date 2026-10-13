@@ -1,18 +1,3 @@
-"""音游窝 QQ 机器人插件（AstrBot）v3.0.0。
-
-提供以下群聊指令：
-- j     查询"音游窝"店内实时在店人员（统一 Bot API），以图片 + 文本形式发送。
-- 25h   娱乐指令，回复 25時、ナイトコードで（不设冷却）。
-- jg    本时段每小时游玩价格。
-- mj    发送 bot 账号收藏的表情包（/mjlist 查看编号）。
-- bd    QQ 绑定：/bd 验证码。
-- @bot 离店  按 QQ 绑定自助离店结算。
-- 自动进 / 离店播报（轮询统一 Bot API 差分，含时长与扣费）。
-
-数据来源：站点统一 Bot API（POST /api/botAction，Bot 明钥鉴权、权限按 action 控制）。
-图片在本机渲染：Jinja2（自动转义）生成 HTML，Playwright 驱动本机浏览器内核截图，
-不调用任何第三方渲染服务。
-"""
 
 from __future__ import annotations
 
@@ -36,7 +21,6 @@ from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.message.message_event_result import MessageChain
 
-# 兼容 AstrBot 不同的插件加载方式：优先相对导入，失败则退回到目录导入
 try:
     from .dcs_attend import (
         call_force_leave,
@@ -78,7 +62,7 @@ try:
         visit_key,
     )
     from .dcs_render import WhosinRenderer
-except ImportError:  # pragma: no cover - 取决于运行环境
+except ImportError:
     _plugin_dir = str(Path(__file__).resolve().parent)
     if _plugin_dir not in sys.path:
         sys.path.insert(0, _plugin_dir)
@@ -125,81 +109,65 @@ except ImportError:  # pragma: no cover - 取决于运行环境
 
 PLUGIN_NAME = "astrbot_plugin_dcs_whosin"
 
-# 场馆时区：UTC+8（与站点的 FLT 时间一致）
 FLT = timezone(timedelta(hours=8))
 
-# aiocqhttp 适配器补丁的标记（由控制台 apply_adapter_patch.ps1 写入；后者为旧版整文件补丁）
 ADAPTER_PATCH_MARKERS = ("DCS-PATCH:filter", "[[DCS 自定义过滤]]")
 
-
 def _as_list(value) -> list[str]:
-    """把配置值统一为字符串列表（兼容逗号分隔的字符串写法）。"""
     if value is None:
         return []
     if isinstance(value, str):
         value = value.replace("，", ",").split(",")
     return [str(item).strip() for item in value if str(item).strip()]
 
-
 def _detect_adapter_patch() -> bool | None:
-    """检查 AstrBot 的 aiocqhttp 适配器补丁是否在位；无法判断时返回 None。"""
     try:
         from astrbot.core.platform.sources.aiocqhttp import (
             aiocqhttp_platform_adapter as adapter_module,
         )
 
         source = inspect.getsource(adapter_module)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
     return any(marker in source for marker in ADAPTER_PATCH_MARKERS)
 
-
 class DcsWhosinPlugin(Star):
-    """音游窝机器人插件主类。"""
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
-        # 插件所在目录，用于定位模板与素材
         self.plugin_dir = Path(__file__).resolve().parent
         self.renderer = WhosinRenderer(self.plugin_dir, self._resolve_cache_dir())
-        # 插件数据目录（图片缓存与进/离店快照）
         self.plugin_data_dir = self.renderer.cache_dir.parent
-        # 静默策略状态（内存级，插件重载即清零）
         self._last_by_user: dict[str, float] = {}
         self._last_notice: dict[str, float] = {}
         self._group_next_slot: dict[str, float] = {}
-        # 后台任务：状态推送 / 渲染依赖补装
         self._status_task: asyncio.Task | None = None
         self._deps_task: asyncio.Task | None = None
         self._last_health: bool | None = None
         self._last_push_at = 0.0
         self._adapter_patched: bool | None = None
-        # 已见过的群（首次见到时记录一条日志，便于配置白名单）
         self._seen_groups: set[str] = set()
-        # 进/离店播报：在店快照、统一去重表与计费表缓存
         self._presence: dict[str, dict] = {}
         self._presence_ready = False
         self._presence_task: asyncio.Task | None = None
-        self._records_state: dict | None = None  # 统一去重表 {"seen": {...}}
-        self._mj_task: asyncio.Task | None = None  # /mj 表情预取任务
-        self._attend_last: dict[str, float] = {}  # @bot 自助离店冷却
-        self._bind_last: dict[str, float] = {}  # /bd QQ绑定冷却
-        self._bookings: list[dict] = []  # 包场（包机）记录
+        self._records_state: dict | None = None
+        self._mj_task: asyncio.Task | None = None
+        self._attend_last: dict[str, float] = {}
+        self._bind_last: dict[str, float] = {}
+        self._bookings: list[dict] = []
         self._pricing: dict | None = None
         self._pricing_at = 0.0
         self._pricing_default_logged = False
 
     @staticmethod
     def _resolve_cache_dir() -> Path:
-        """图片缓存放在 AstrBot 的插件数据目录（插件目录可能是只读挂载）。"""
         try:
             return Path(StarTools.get_data_dir(PLUGIN_NAME)) / "image_cache"
-        except Exception:  # noqa: BLE001
+        except Exception:
             return Path(tempfile.gettempdir()) / PLUGIN_NAME / "image_cache"
 
     async def initialize(self) -> None:
-        """插件加载后检查适配器补丁，并启动各后台任务。"""
         self._adapter_patched = _detect_adapter_patch()
         if self._adapter_patched is False:
             logger.warning(
@@ -226,11 +194,6 @@ class DcsWhosinPlugin(Star):
         logger.info("[dcs_whosin] 状态推送任务已启动。")
 
     async def _ensure_render_dependencies(self) -> None:
-        """渲染依赖缺失时，用 AstrBot 自带的 pip 安装器在后台补装。
-
-        渲染依赖是按需导入的，缺失时插件照常加载（只发文字版），
-        因此 AstrBot 不会自动安装它们；这里主动补装，装好后下一次查询即恢复出图。
-        """
         if not self.config.get("enable_image", True):
             return
         missing = [name for name in ("jinja2", "playwright") if importlib.util.find_spec(name) is None]
@@ -238,23 +201,19 @@ class DcsWhosinPlugin(Star):
             return
         try:
             from astrbot.core import pip_installer
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.warning(f"[dcs_whosin] 缺少图片渲染依赖 {missing}，请在 AstrBot 插件页为本插件安装依赖。")
             return
         logger.info(f"[dcs_whosin] 正在后台安装图片渲染依赖 {missing}（装好前只发文字版）……")
         try:
             await pip_installer.install(requirements_path=str(self.plugin_dir / "requirements.txt"))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning(f"[dcs_whosin] 渲染依赖安装失败：{exc}；可在 AstrBot 插件页手动安装依赖。")
             return
         importlib.invalidate_caches()
         logger.info("[dcs_whosin] 图片渲染依赖安装完成，下一次查询起恢复出图。")
 
-    # ------------------------------------------------------------------
-    # 统一 Bot API
-    # ------------------------------------------------------------------
     def _api_config(self):
-        """统一 Bot API 的连接配置：(urls, fallback_ips, timeout, key)。"""
         urls = self.config.get("target_urls", DEFAULT_TARGET_URLS)
         if isinstance(urls, str):
             urls = [urls]
@@ -264,15 +223,10 @@ class DcsWhosinPlugin(Star):
         return urls, fallback_ips, timeout, key
 
     def _api_qqid(self) -> str:
-        """轮询等无发送者场景使用的 qqid（机器人号，可配置）。"""
         cfg = str(self.config.get("bot_qqid", "") or "").strip()
         return cfg if cfg.isdigit() else "0"
 
     async def _fetch_present_users(self, qqid: str = ""):
-        """调用统一 Bot API 获取在店用户。
-
-        成功返回 (users, None)；失败返回 (None, 失败结果 dict)。
-        """
         urls, fallback_ips, timeout, key = self._api_config()
         if not key:
             return None, {"ok": False, "error": "NO_KEY", "message": "未配置 Bot 明钥"}
@@ -286,11 +240,7 @@ class DcsWhosinPlugin(Star):
             return None, {"ok": False, "error": "BAD_DATA", "message": "返回数据格式异常"}
         return users, None
 
-    # ------------------------------------------------------------------
-    # 状态推送
-    # ------------------------------------------------------------------
     async def _status_loop(self) -> None:
-        """按配置间隔检查站点状态，并按推送模式通知维护者。"""
         await asyncio.sleep(20)
         first = True
         while True:
@@ -300,13 +250,12 @@ class DcsWhosinPlugin(Star):
                     first = False
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning(f"[dcs_whosin] 状态推送异常：{exc}")
             interval = int(self.config.get("status_push_interval_seconds", 600) or 600)
             await asyncio.sleep(max(interval, 60))
 
     async def _status_tick(self, first: bool) -> None:
-        """检查一次站点状态；smart 模式只在启动、异常/恢复与心跳时推送。"""
         mode = str(self.config.get("status_push_mode", "smart") or "smart")
         users, err = await self._fetch_present_users()
         healthy = users is not None
@@ -346,7 +295,6 @@ class DcsWhosinPlugin(Star):
             venue_line,
         ]
         if not healthy and err_detail:
-            # 详情只推送给维护者，群内不展示
             lines.append(f"详情：{err_detail[:200]}")
         if first or self._adapter_patched is False:
             lines.append(f"适配器补丁：{patch_text}")
@@ -354,21 +302,16 @@ class DcsWhosinPlugin(Star):
         self._last_push_at = time.monotonic()
 
     async def _push_status(self, text: str) -> None:
-        """把状态文本推送到所有目标会话。"""
         for target in _as_list(self.config.get("status_push_targets")):
             try:
                 ok = await self.context.send_message(target, MessageChain([Plain(text)]))
                 if not ok:
                     logger.warning(f"[dcs_whosin] 状态推送目标不存在：{target}")
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning(f"[dcs_whosin] 状态推送失败（{target}）：{exc}")
 
-    # ------------------------------------------------------------------
-    # 指令：j
-    # ------------------------------------------------------------------
     @filter.command("j")
     async def query_whosin(self, event: AstrMessageEvent):
-        """查询音游窝店内实时人员，以图片 + 文本形式发送"""
         if not self._policy_allows(event):
             return
 
@@ -379,7 +322,6 @@ class DcsWhosinPlugin(Star):
             return
         await self._wait_group_slot(event)
 
-        # 包场时段：只提示包场，不返回在店名单
         if self.config.get("booking_enable", True):
             active = active_bookings(self._bookings)
             if active:
@@ -392,7 +334,6 @@ class DcsWhosinPlugin(Star):
             qqid = str(event.get_sender_id() or "").strip()
             users, err = await self._fetch_present_users(qqid)
 
-            # 接口失败：群内只给通用提示，详细原因写日志
             if users is None:
                 logger.warning(f"[dcs_whosin] 查询失败：{err.get('error')} {err.get('message') or ''}")
                 yield event.plain_result(f"查询失败：{public_api_error(err)}")
@@ -400,11 +341,8 @@ class DcsWhosinPlugin(Star):
 
             players = [u for u in users if u.get("role") == "player"]
             staff_line = [u for u in users if u.get("role") in ("staff", "admin")]
-            # 管理在前、士大夫在后（与旧版展示一致）
             staff_line.sort(key=lambda u: 0 if u.get("role") == "admin" else 1)
 
-            # 重要规则：玩家数量为 0（只有管理员/士大夫或完全无人）时，
-            # 不发送空信息，统一发送指定提示文案
             if not players:
                 yield event.plain_result(EMPTY_PLAYER_MESSAGE)
                 return
@@ -422,7 +360,6 @@ class DcsWhosinPlugin(Star):
             source_host = urlsplit(urls[0]).netloc if urls else ""
             image_path = await self._render_image(players, staff_line, source_host)
             if image_path:
-                # 图片 + 文本合并为一条消息发送
                 yield event.chain_result(
                     [
                         Plain(text),
@@ -430,35 +367,26 @@ class DcsWhosinPlugin(Star):
                     ]
                 )
             else:
-                # 图片渲染失败时降级为纯文本（附提示，避免"未返图"的困惑）
                 yield event.plain_result(text + "\n\n（注：图片渲染暂时失败，本次为文字版）")
-        except Exception as exc:  # noqa: BLE001 - 兜底，保证插件不因单次查询崩溃
+        except Exception as exc:
             logger.error(f"[dcs_whosin] 查询在店人员时发生异常：{exc!r}")
             yield event.plain_result("查询失败，请稍后再试。")
 
-    # ------------------------------------------------------------------
-    # 指令：25h
-    # ------------------------------------------------------------------
     @filter.command("25h")
     async def nightcord(self, event: AstrMessageEvent):
-        """娱乐指令：回复 25時、ナイトコードで（不设冷却）"""
         if not self._policy_allows(event):
             return
         yield event.plain_result("25時、ナイトコードで")
 
-    # ------------------------------------------------------------------
-    # 指令：jg —— 本时段每小时游玩价格
-    # ------------------------------------------------------------------
     @filter.command("jg")
     async def current_price(self, event: AstrMessageEvent):
-        """查询本时段每小时游玩价格（含折扣与封顶说明，不设冷却）"""
         if not self._policy_allows(event):
             return
         try:
             pricing = await self._get_pricing("")
             prefix = str(self.config.get("presence_prefix", "【Kanade】") or "")
             text = format_current_rate_message(pricing, prefix)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning(f"[dcs_whosin] 时段价格查询失败：{exc!r}")
             text = None
         if text:
@@ -466,12 +394,8 @@ class DcsWhosinPlugin(Star):
         else:
             yield event.plain_result("价格查询失败，请稍后再试。")
 
-    # ------------------------------------------------------------------
-    # 指令：mj —— 发送 bot 收藏的表情包
-    # ------------------------------------------------------------------
     @filter.command("mj")
     async def mj_sticker(self, event: AstrMessageEvent):
-        """发送 bot 收藏的表情包（不设冷却；受同群最小间隔约束）"""
         if not self._policy_allows(event):
             return
         if not self.config.get("mj_enable", True):
@@ -487,12 +411,8 @@ class DcsWhosinPlugin(Star):
         else:
             yield event.plain_result("表情包还没准备好，稍后再试试～")
 
-    # ------------------------------------------------------------------
-    # 指令：mjlist —— 列出收藏表情编号（用于选择 mj_sticker_index）
-    # ------------------------------------------------------------------
     @filter.command("mjlist")
     async def mj_list(self, event: AstrMessageEvent):
-        """列出 bot 收藏的表情（编号 + 图片，方便选择 mj_sticker_index）"""
         if not self._policy_allows(event):
             return
         if not self.config.get("mj_enable", True):
@@ -512,13 +432,8 @@ class DcsWhosinPlugin(Star):
         if len(urls) > 12:
             yield event.plain_result(f"（收藏共 {len(urls)} 个，仅显示前 12 个）")
 
-    # ------------------------------------------------------------------
-    # 指令：@bot 自助离店（按 QQ 绑定自动结算）
-    # 说明：为避免"人未到店就被远程进店"的风险，不支持机器人进店（进店请在网站操作）。
-    # ------------------------------------------------------------------
     @filter.command("离店")
     async def attend_leave(self, event: AstrMessageEvent):
-        """@机器人 离店 —— 自动离店并结算"""
         if not self._policy_allows(event):
             return
         if not self.config.get("attend_enable", True):
@@ -527,14 +442,10 @@ class DcsWhosinPlugin(Star):
         if text:
             yield event.plain_result(text)
 
-    # ------------------------------------------------------------------
-    # 指令：/bd 验证码 —— QQ 绑定（网站「个人信息」页获取验证码）
-    # ------------------------------------------------------------------
     @filter.regex(r"(?i)^bd\s*\+?\s*(.*)$")
     async def bind_qq(self, event: AstrMessageEvent):
-        """QQ 绑定：/bd 验证码（也支持 /bd验证码）"""
         if not event.is_at_or_wake_command:
-            return  # 仅响应 /bd 或 @bot bd，避免普通聊天误触发
+            return
         if not self._policy_allows(event):
             return
         text = event.get_message_str().strip()
@@ -568,7 +479,7 @@ class DcsWhosinPlugin(Star):
         result = None
         try:
             result = await bot_action(urls, fallback_ips, timeout, key, qq, "bindQq", code)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning(f"[dcs_whosin] /bd 绑定请求异常：{exc!r}")
         if isinstance(result, dict) and result.get("ok"):
             data = result.get("data") or {}
@@ -581,12 +492,8 @@ class DcsWhosinPlugin(Star):
             format_bind_reply(result if isinstance(result, dict) else {"ok": False, "error": "network"}, qq)
         )
 
-    # ------------------------------------------------------------------
-    # 指令：包场（包机）登记 / 取消（仅群主、管理员或 booking_admins）
-    # ------------------------------------------------------------------
     @filter.regex(r"^包(?:机|场)\s*\S")
     async def booking_add(self, event: AstrMessageEvent):
-        """登记包场：@机器人 包场 舞萌 10日14时~16时"""
         if not event.is_at_or_wake_command:
             return
         if not self.config.get("booking_enable", True):
@@ -613,7 +520,6 @@ class DcsWhosinPlugin(Star):
 
     @filter.regex(r"^取消包(?:机|场)")
     async def booking_cancel(self, event: AstrMessageEvent):
-        """取消包场：@机器人 取消包场 [机台关键词]"""
         if not event.is_at_or_wake_command:
             return
         if not self.config.get("booking_enable", True):
@@ -647,11 +553,7 @@ class DcsWhosinPlugin(Star):
         logger.info(f"[dcs_whosin] 包场取消：{len(removed)} 条（关键词={keyword or '全部'}）")
         yield event.plain_result("\n".join(lines))
 
-    # ------------------------------------------------------------------
-    # 静默策略：私聊开关 / 群白名单 / 频率限制
-    # ------------------------------------------------------------------
     def _policy_allows(self, event: AstrMessageEvent) -> bool:
-        """私聊只看 allow_private_chat，群聊只看 allowed_groups；不放行时静默忽略。"""
         if event.is_private_chat():
             return bool(self.config.get("allow_private_chat", False))
 
@@ -667,10 +569,6 @@ class DcsWhosinPlugin(Star):
         return not allowed_groups or group_id in allowed_groups
 
     def _check_cooldown(self, event: AstrMessageEvent) -> tuple[bool, str | None]:
-        """/j 冷却：同一用户在同一群 cooldown_seconds 内只能查一次，返回 (是否放行, 提示文本)。
-
-        冷却期内只提示一次，之后静默，避免刷屏。
-        """
         cooldown = int(self.config.get("cooldown_seconds", 60) or 0)
         if cooldown <= 0:
             return True, None
@@ -687,14 +585,13 @@ class DcsWhosinPlugin(Star):
             return False, None
 
         self._last_by_user[user_key] = now
-        if len(self._last_by_user) > 1000:  # 定期清理过期记录，防止常驻内存增长
+        if len(self._last_by_user) > 1000:
             for store in (self._last_by_user, self._last_notice):
                 for key in [k for k, t in store.items() if now - t >= cooldown]:
                     store.pop(key, None)
         return True, None
 
     async def _wait_group_slot(self, event: AstrMessageEvent) -> None:
-        """同群回复最小间隔：为本次回复预约发送时刻，并发请求依次排队。"""
         group_id = str(event.get_group_id() or "")
         interval = float(self.config.get("group_interval_seconds", 5) or 0)
         if not group_id or interval <= 0:
@@ -705,9 +602,6 @@ class DcsWhosinPlugin(Star):
         if slot > now:
             await asyncio.sleep(slot - now)
 
-    # ------------------------------------------------------------------
-    # 包场（包机）记录
-    # ------------------------------------------------------------------
     def _booking_file(self) -> Path:
         return self.plugin_data_dir / "bookings.json"
 
@@ -726,7 +620,7 @@ class DcsWhosinPlugin(Star):
                 self._save_bookings()
             if self._bookings:
                 logger.info(f"[dcs_whosin] 已恢复 {len(self._bookings)} 条包场记录")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning(f"[dcs_whosin] 包场记录恢复失败：{exc!r}")
 
     def _save_bookings(self) -> None:
@@ -736,11 +630,10 @@ class DcsWhosinPlugin(Star):
             temp = path.with_suffix(".tmp")
             temp.write_text(json.dumps({"bookings": self._bookings}, ensure_ascii=False), encoding="utf-8")
             temp.replace(path)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning(f"[dcs_whosin] 包场记录保存失败：{exc!r}")
 
     async def _is_booking_admin(self, event: AstrMessageEvent) -> bool:
-        """群主/管理员，或配置 booking_admins 中的 QQ，才可管理包场。"""
         qq = str(event.get_sender_id() or "").strip()
         if not qq.isdigit():
             return False
@@ -757,18 +650,14 @@ class DcsWhosinPlugin(Star):
                 user_id=int(qq),
                 no_cache=False,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning(f"[dcs_whosin] 查询群成员身份失败：{exc!r}")
             return False
         role = str((info or {}).get("role") or "")
         return role in ("owner", "admin")
 
-    # ------------------------------------------------------------------
-    # 内部辅助
-    # ------------------------------------------------------------------
     @staticmethod
     def _render_entry(user: dict) -> dict:
-        """把在店用户转换为渲染模板需要的条目（入店时间按 FLT 显示）。"""
         entered_ms = user.get("entered_ms")
         entered_text = ""
         minutes = None
@@ -778,7 +667,6 @@ class DcsWhosinPlugin(Star):
         return {"name": user.get("name") or "", "entered": entered_text, "minutes": minutes}
 
     async def _render_image(self, players, staff_line, source_host: str) -> str | None:
-        """在本机渲染在店一览图片，返回 PNG 路径；渲染失败时返回 None。"""
         now = datetime.now(FLT)
         ttl = int(self.config.get("cache_ttl_seconds", 30) or 0)
         theme = str(self.config.get("image_theme", "cyberpunk-bw") or "cyberpunk-bw")
@@ -802,14 +690,10 @@ class DcsWhosinPlugin(Star):
             timeout=float(self.config.get("render_timeout_seconds", 20) or 20),
         )
 
-    # ------------------------------------------------------------------
-    # 进/离店播报
-    # ------------------------------------------------------------------
     def _presence_state_file(self) -> Path:
         return self.plugin_data_dir / "presence_state.json"
 
     def _load_presence_state(self) -> None:
-        """插件启动时恢复进/离店状态（统一去重表 + 在店快照）。"""
         try:
             path = self._presence_state_file()
             if not path.exists():
@@ -819,7 +703,6 @@ class DcsWhosinPlugin(Star):
             seen = data.get("seen")
             if isinstance(seen, dict):
                 self._records_state = {"seen": seen}
-            # 兼容旧版本：把 recent_exits 迁移为统一去重表的离店标记
             legacy_exits = data.get("recent_exits")
             if isinstance(legacy_exits, dict):
                 ledger = self._ledger_seen()
@@ -844,7 +727,7 @@ class DcsWhosinPlugin(Star):
                 self._presence_ready = True
                 age_min = max(0, int((time.time() - saved_at) / 60))
                 logger.info(f"[dcs_whosin] 已恢复进离店快照（{len(self._presence)} 人，约 {age_min} 分钟前）")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning(f"[dcs_whosin] 进离店状态恢复失败：{exc!r}")
 
     def _save_presence_state(self) -> None:
@@ -859,11 +742,10 @@ class DcsWhosinPlugin(Star):
             }
             temp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
             temp.replace(path)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning(f"[dcs_whosin] 进离店状态保存失败：{exc!r}")
 
     async def _presence_loop(self) -> None:
-        """按配置间隔轮询站点，播报玩家进店 / 离店（含时长与扣费）。"""
         await asyncio.sleep(15)
         while True:
             interval = 60
@@ -874,12 +756,11 @@ class DcsWhosinPlugin(Star):
                     await self._presence_tick(interval)
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning(f"[dcs_whosin] 进离店播报异常：{exc!r}")
             await asyncio.sleep(interval)
 
     async def _presence_tick(self, interval: int) -> None:
-        """轮询统一 Bot API 的在店名单，差分播报进/离店。"""
         users, err = await self._fetch_present_users()
         if users is None:
             logger.warning(f"[dcs_whosin] 进离店检查失败：{err.get('error')} {err.get('message') or ''}")
@@ -910,7 +791,7 @@ class DcsWhosinPlugin(Star):
             key = visit_key(user.get("id"), user.get("entered_ms"))
             record = self._ledger_get(key)
             if record.get("e"):
-                continue  # 其它通道（自助离店等）已记录过进店
+                continue
             messages.append(f"{prefix}{user.get('name', '')}进店了")
             self._ledger_mark(key, e=1, at=user.get("entered_ms"))
         for user in exits:
@@ -921,12 +802,10 @@ class DcsWhosinPlugin(Star):
             key = visit_key(user.get("id"), entered_ms)
             record = self._ledger_get(key)
             if record.get("x"):
-                continue  # 自助离店已播报过（避免重复）
+                continue
             last_seen = int(user.get("last_seen_ms") or now_ms)
             gap = max(0, now_ms - last_seen)
-            # 真实离店发生在（最后在店, 本次发现]之间，取中点降低误差
             settle_ms = last_seen + min(gap, interval * 1000) // 2
-            # 游玩时长向上取整（不足 1 分钟按 1 分钟计）
             minutes = max(0, math.ceil((settle_ms - int(entered_ms)) / 60000))
             pricing = await self._get_pricing("")
             try:
@@ -946,10 +825,6 @@ class DcsWhosinPlugin(Star):
         await self._broadcast_presence(messages)
 
     def _ledger_seen(self) -> dict:
-        """统一去重表：{"用户ID:进店毫秒": {"e": 进店已播, "x": 离店已播, "at": 进店时间}}。
-
-        轮询播报与自助离店共用，确保任何事件只记一次。
-        """
         if self._records_state is None:
             self._records_state = {"seen": {}}
         seen = self._records_state.get("seen")
@@ -985,7 +860,6 @@ class DcsWhosinPlugin(Star):
             return
         targets = _as_list(self.config.get("presence_targets"))
         if not targets:
-            # 未配置时退回会馆群（平台 id 与状态推送约定一致）
             targets = [f"napcat:GroupMessage:{gid}" for gid in _as_list(self.config.get("allowed_groups"))]
         if not targets:
             logger.warning("[dcs_whosin] 进离店播报未配置目标，已跳过")
@@ -997,14 +871,13 @@ class DcsWhosinPlugin(Star):
                     ok = await self.context.send_message(target, MessageChain([Plain(text)]))
                     if not ok:
                         logger.warning(f"[dcs_whosin] 进离店播报目标不存在：{target}")
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     logger.warning(f"[dcs_whosin] 进离店播报失败（{target}）：{exc!r}")
             logger.info(f"[dcs_whosin] 进离店播报：{text}")
             if gap > 0:
                 await asyncio.sleep(gap)
 
     async def _get_pricing(self, source_url: str) -> dict:
-        """获取站点计费表（缓存 presence_pricing_refresh_hours 小时；失败用旧表/内置表）。"""
         now = time.monotonic()
         ttl = max(1, int(self.config.get("presence_pricing_refresh_hours", 6) or 6)) * 3600
         if self._pricing and now - self._pricing_at < ttl:
@@ -1031,7 +904,7 @@ class DcsWhosinPlugin(Star):
                 str(self.config.get("login_username", "") or ""),
                 str(self.config.get("login_password", "") or ""),
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning(f"[dcs_whosin] 计费表抓取失败：{exc!r}")
 
         pricing = parse_pricing(html) if html else None
@@ -1040,7 +913,7 @@ class DcsWhosinPlugin(Star):
             self._pricing_at = now
             return pricing
         if self._pricing:
-            self._pricing_at = now  # 沿用旧表，下轮再试
+            self._pricing_at = now
             return self._pricing
         if not self._pricing_default_logged:
             self._pricing_default_logged = True
@@ -1049,9 +922,6 @@ class DcsWhosinPlugin(Star):
         self._pricing_at = now - ttl // 2
         return self._pricing
 
-    # ------------------------------------------------------------------
-    # /mj 收藏表情辅助
-    # ------------------------------------------------------------------
     def _platform_id(self) -> str:
         for key in ("presence_targets", "status_push_targets"):
             for target in _as_list(self.config.get(key)):
@@ -1071,7 +941,7 @@ class DcsWhosinPlugin(Star):
             return []
         try:
             data = await bot.call_action("fetch_custom_face")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning(f"[dcs_whosin] 获取收藏表情失败：{exc!r}")
             return []
         return normalize_custom_faces(data)
@@ -1090,7 +960,6 @@ class DcsWhosinPlugin(Star):
         return path
 
     async def _mj_prefetch(self) -> None:
-        """插件启动后预取并缓存 /mj 表情；日志会显示收藏数量便于核对。"""
         await asyncio.sleep(25)
         try:
             index = self._mj_index()
@@ -1101,7 +970,7 @@ class DcsWhosinPlugin(Star):
             if bot is None and platform is not None and hasattr(platform, "get_client"):
                 try:
                     bot = platform.get_client()
-                except Exception:  # noqa: BLE001
+                except Exception:
                     bot = None
             if bot is None:
                 logger.info("[dcs_whosin] /mj 预取：napcat 平台未就绪，将在首次使用时获取")
@@ -1109,12 +978,9 @@ class DcsWhosinPlugin(Star):
             await self._fetch_and_cache_sticker(bot, index)
         except asyncio.CancelledError:
             raise
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning(f"[dcs_whosin] /mj 预取失败：{exc!r}")
 
-    # ------------------------------------------------------------------
-    # @bot 自助离店
-    # ------------------------------------------------------------------
     async def _attend_action(self, event: AstrMessageEvent, action: str) -> str:
         qq = str(event.get_sender_id() or "").strip()
         if not qq.isdigit():
@@ -1134,7 +1000,7 @@ class DcsWhosinPlugin(Star):
         result = None
         try:
             result = await self._attend_leave_via_snapshot(qq)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning(f"[dcs_whosin] @bot 自助离店异常：{exc!r}")
 
         text, meta = format_attend_reply(action, result, prefix)
@@ -1174,7 +1040,6 @@ class DcsWhosinPlugin(Star):
         return None
 
     async def _attend_leave_via_snapshot(self, qq: str) -> dict | None:
-        """按 QQ 绑定找账号（统一 API 在店名单）→ 工作人员代离店 → 取真实扣费。"""
         snapshot = None
         now_ms = int(time.time() * 1000)
         if self._presence_ready and self._presence:
@@ -1183,7 +1048,6 @@ class DcsWhosinPlugin(Star):
                 snapshot = list(self._presence.values())
         match = self._find_snapshot_user(snapshot, qq)
         if match is None:
-            # 内存快照里没有（可能刚进店 / 快照太旧）：现场拉一次
             users, _err = await self._fetch_present_users(qq)
             if users is None:
                 return None
@@ -1224,7 +1088,6 @@ class DcsWhosinPlugin(Star):
         }
 
     async def terminate(self):
-        """插件被卸载 / 停用时停止后台任务，关闭本地浏览器并清理图片缓存。"""
         for task in (self._status_task, self._deps_task, self._presence_task, self._mj_task):
             if task and not task.done():
                 task.cancel()
