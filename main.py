@@ -788,7 +788,7 @@ class DcsWhosinPlugin(Star):
         prefix = str(self.config.get("presence_prefix", "【Kanade】") or "")
         messages: list[str] = []
         for user in entries:
-            key = visit_key(user.get("id"), user.get("entered_ms"))
+            key = visit_key(user.get("id"), user.get("entered_ms")) or user.get("key")
             record = self._ledger_get(key)
             if record.get("e"):
                 continue
@@ -799,7 +799,7 @@ class DcsWhosinPlugin(Star):
             if not entered_ms:
                 logger.warning(f"[dcs_whosin] {user.get('name', '')} 离店但缺少入店时间，跳过播报")
                 continue
-            key = visit_key(user.get("id"), entered_ms)
+            key = visit_key(user.get("id"), entered_ms) or user.get("key")
             record = self._ledger_get(key)
             if record.get("x"):
                 continue

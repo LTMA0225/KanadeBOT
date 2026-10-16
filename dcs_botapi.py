@@ -32,19 +32,30 @@ def parse_present_users(data: Any) -> Optional[List[Dict[str, Any]]]:
         if not isinstance(item, dict):
             continue
         name = str(item.get("nickname") or "").strip()
-        uid = item.get("id")
         entered = _parse_iso_ms(item.get("enteredAt"))
-        if not name or uid is None or entered is None:
+        if not name or entered is None:
             continue
+        uid = item.get("id")
+        try:
+            user_id = int(uid) if uid is not None else None
+        except (TypeError, ValueError):
+            user_id = None
+        qqid = str(item.get("qqid") or "").strip()
+        if user_id is not None:
+            key = f"id:{user_id}"
+        elif qqid:
+            key = f"qq:{qqid}"
+        else:
+            key = f"e:{entered}:{name}"
         users.append({
-            "key": f"id:{uid}",
-            "id": int(uid),
+            "key": key,
+            "id": user_id,
             "name": name,
             "role": map_role(item.get("role")),
             "entered_ms": entered,
             "multiplier": item.get("chargeMultiplier"),
             "balance": item.get("balance"),
-            "qqid": str(item.get("qqid") or "").strip(),
+            "qqid": qqid,
         })
     return users
 
