@@ -7,6 +7,7 @@ import importlib.util
 import inspect
 import json
 import math
+import random
 import re
 import sys
 import tempfile
@@ -112,6 +113,15 @@ PLUGIN_NAME = "astrbot_plugin_dcs_whosin"
 FLT = timezone(timedelta(hours=8))
 
 ADAPTER_PATCH_MARKERS = ("DCS-PATCH:filter", "[[DCS 自定义过滤]]")
+
+QUERY_QUIPS = (
+    "等我吃完这口杯面帮你查哦…",
+    "唔…稍等一下，我把耳机摘下来看看…",
+    "啊、好的…让我看一眼…",
+    "等我一小会儿，马上就好…",
+    "好，我看看哦…",
+    "嗯…稍等，我确认一下。",
+)
 
 def _as_list(value) -> list[str]:
     if value is None:
@@ -329,6 +339,16 @@ class DcsWhosinPlugin(Star):
                 logger.info(f"[dcs_whosin] /j 命中包场提示（{len(active)} 条）")
                 yield event.plain_result(format_booking_notice(active, prefix))
                 return
+
+        if self.config.get("query_quip_enable", True):
+            quips = _as_list(self.config.get("query_quip_lines")) or list(QUERY_QUIPS)
+            yield event.plain_result(random.choice(quips))
+            try:
+                delay_ms = int(self.config.get("query_quip_delay_ms", 1500) or 0)
+            except (TypeError, ValueError):
+                delay_ms = 1500
+            if delay_ms > 0:
+                await asyncio.sleep(min(delay_ms, 10000) / 1000)
 
         try:
             qqid = str(event.get_sender_id() or "").strip()

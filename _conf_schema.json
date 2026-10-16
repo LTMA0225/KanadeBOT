@@ -226,5 +226,20 @@
     "description": "允许登记/取消包场的额外 QQ（群主/管理员无需填写）",
     "type": "list",
     "default": []
+  },
+  "query_quip_enable": {
+    "description": "查询人数前先发一句过场台词（杯面/找耳机等，增加真实感）",
+    "type": "bool",
+    "default": true
+  },
+  "query_quip_lines": {
+    "description": "自定义过场台词（留空使用内置台词池）",
+    "type": "list",
+    "default": []
+  },
+  "query_quip_delay_ms": {
+    "description": "过场台词与查询结果之间的停顿（毫秒，0=不停顿）",
+    "type": "int",
+    "default": 1500
   }
 }
