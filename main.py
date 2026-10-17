@@ -582,16 +582,29 @@ class DcsWhosinPlugin(Star):
         Args:
             query(string): 搜索关键词，1 到 128 个字符
         '''
-        cfg = self.context.get_config(umo=event.unified_msg_origin)
         key = ""
-        for item in cfg.get("provider", []) or []:
-            if str(item.get("id") or "") == "deepseek":
-                keys = item.get("key") or []
-                if keys:
-                    key = str(keys[0])
-                break
+        provider = self.context.get_provider_by_id("deepseek")
+        if provider is not None:
+            keys = provider.provider_config.get("key") or []
+            if keys:
+                key = str(keys[0])
+        provider_ids = []
         if not key:
-            return "联网搜索不可用：未找到 DeepSeek 密钥。"
+            cfg = self.context.get_config(umo=event.unified_msg_origin)
+            for item in cfg.get("provider", []) or []:
+                if not isinstance(item, dict):
+                    continue
+                provider_ids.append(str(item.get("id") or ""))
+                if str(item.get("id") or "") == "deepseek":
+                    keys = item.get("key") or []
+                    if keys:
+                        key = str(keys[0])
+                    break
+        if not key:
+            logger.warning(
+                f"[dcs_whosin] web_search 未找到密钥：umo={event.unified_msg_origin!r} 配置内 provider={provider_ids}"
+            )
+            return "联网搜索暂时不可用，请稍后再试。"
         query = str(query or "").strip()[:128]
         if not query:
             return "搜索关键词为空。"
