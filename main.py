@@ -636,6 +636,84 @@ class DcsWhosinPlugin(Star):
             lines.append(f"- {title}{suffix}\n  {summary[:300]}\n  来源：{link}")
         return "搜索结果如下（请用自己的话简短转述，不要照抄）：\n" + "\n".join(lines)
 
+    @llm_tool(name="moegirl_lookup")
+    async def moegirl_lookup(self, event: AstrMessageEvent, keyword: str):
+        '''查询萌娘百科词条（角色设定、作品背景、剧情、术语与梗）。
+
+        当问到动漫/游戏角色、作品设定、剧情或梗时优先使用，比普通搜索更准。
+
+        Args:
+            keyword(string): 词条名或关键词，如「宵崎奏」「世界计划」
+        '''
+        key = ""
+        provider = self.context.get_provider_by_id("deepseek")
+        if provider is not None:
+            keys = provider.provider_config.get("key") or []
+            if keys:
+                key = str(keys[0])
+        if not key:
+            return "萌娘百科查询暂时不可用：未找到 DeepSeek 密钥。"
+        keyword = str(keyword or "").strip()[:60]
+        if not keyword:
+            return "查询关键词为空。"
+        import aiohttp
+
+        def clean(text):
+            return re.sub(r"<[^>]+>", "", str(text or "")).strip()
+
+        timeout = aiohttp.ClientTimeout(total=30)
+        results = []
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async def search(query):
+                try:
+                    async with session.post(
+                        "https://api.deepseek.com/v1/tools/search",
+                        headers={"Authorization": f"Bearer {key}"},
+                        json={"query": query, "count": 4},
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            return data.get("results") or []
+                except Exception:
+                    pass
+                return []
+
+            results = await search(
+                f"{keyword} site:zh.moegirl.org.cn OR site:moegirl.uk OR site:moegirl.icu"
+            )
+            if not results:
+                results = await search(f"{keyword} 萌娘百科")
+            if not results:
+                return "萌娘百科上没查到相关词条。"
+            best = next(
+                (str(item.get("url") or "") for item in results if "zh.moegirl.org.cn" in str(item.get("url") or "")),
+                "",
+            )
+            content = ""
+            if best:
+                try:
+                    async with session.post(
+                        "https://api.deepseek.com/v1/tools/fetch",
+                        headers={"Authorization": f"Bearer {key}"},
+                        json={"url": best},
+                    ) as resp:
+                        if resp.status == 200:
+                            page = await resp.json()
+                            content = str(page.get("content") or "")[:2500]
+                except Exception:
+                    content = ""
+        lines = []
+        for item in results[:3]:
+            title = clean(item.get("title"))
+            summary = clean(item.get("summary") or item.get("snippet"))
+            link = str(item.get("url") or "").strip()
+            lines.append(f"- {title}\n  {summary[:300]}\n  {link}")
+        text = "萌娘百科查询结果：\n" + "\n".join(lines)
+        if content:
+            text += "\n\n词条正文节选：\n" + content
+        text += "\n（请用自己的话简短回答，不要照抄；以词条内容为准）"
+        return text
+
     def _policy_allows(self, event: AstrMessageEvent) -> bool:
         if event.is_private_chat():
             return bool(self.config.get("allow_private_chat", False))
