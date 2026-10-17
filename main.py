@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from astrbot.api import AstrBotConfig, logger
+from astrbot.api import AstrBotConfig, llm_tool, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, StarTools
@@ -572,6 +572,56 @@ class DcsWhosinPlugin(Star):
             lines.append(f"· {b.get('machine', '')} {window}")
         logger.info(f"[dcs_whosin] 包场取消：{len(removed)} 条（关键词={keyword or '全部'}）")
         yield event.plain_result("\n".join(lines))
+
+    @llm_tool(name="web_search")
+    async def web_search(self, event: AstrMessageEvent, query: str):
+        '''联网搜索实时信息。
+
+        当用户问到最新新闻、活动、价格、赛事、音乐游戏更新等你不知道或可能已经过时的信息时使用。
+
+        Args:
+            query(string): 搜索关键词，1 到 128 个字符
+        '''
+        cfg = self.context.get_config(umo=event.unified_msg_origin)
+        key = ""
+        for item in cfg.get("provider", []) or []:
+            if str(item.get("id") or "") == "deepseek":
+                keys = item.get("key") or []
+                if keys:
+                    key = str(keys[0])
+                break
+        if not key:
+            return "联网搜索不可用：未找到 DeepSeek 密钥。"
+        query = str(query or "").strip()[:128]
+        if not query:
+            return "搜索关键词为空。"
+        import aiohttp
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=20)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    "https://api.deepseek.com/v1/tools/search",
+                    headers={"Authorization": f"Bearer {key}"},
+                    json={"query": query, "count": 5},
+                ) as resp:
+                    if resp.status != 200:
+                        return f"联网搜索失败（HTTP {resp.status}），请稍后再试。"
+                    data = await resp.json()
+        except Exception as exc:
+            return f"联网搜索失败：{exc!r}"
+        results = data.get("results") or []
+        if not results:
+            return "没有搜到相关结果。"
+        lines = []
+        for item in results[:5]:
+            title = str(item.get("title") or "").strip()
+            summary = str(item.get("summary") or item.get("snippet") or "").strip()
+            link = str(item.get("url") or "").strip()
+            date = str(item.get("date") or "")[:10]
+            suffix = f"（{date}）" if date else ""
+            lines.append(f"- {title}{suffix}\n  {summary[:300]}\n  来源：{link}")
+        return "搜索结果如下（请用自己的话简短转述，不要照抄）：\n" + "\n".join(lines)
 
     def _policy_allows(self, event: AstrMessageEvent) -> bool:
         if event.is_private_chat():
