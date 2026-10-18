@@ -633,8 +633,8 @@ class DcsWhosinPlugin(Star):
             link = str(item.get("url") or "").strip()
             date = str(item.get("date") or "")[:10]
             suffix = f"（{date}）" if date else ""
-            lines.append(f"- {title}{suffix}\n  {summary[:300]}\n  来源：{link}")
-        return "搜索结果如下（请用自己的话简短转述，不要照抄）：\n" + "\n".join(lines)
+            lines.append(f"- {title}{suffix}\n  {summary[:500]}\n  来源：{link}")
+        return "搜索结果如下（请尽量详细、准确地把有用信息转述给用户，不要照抄）：\n" + "\n".join(lines)
 
     @llm_tool(name="moegirl_lookup")
     async def moegirl_lookup(self, event: AstrMessageEvent, keyword: str):
@@ -699,7 +699,7 @@ class DcsWhosinPlugin(Star):
                     ) as resp:
                         if resp.status == 200:
                             page = await resp.json()
-                            content = str(page.get("content") or "")[:2500]
+                            content = str(page.get("content") or "")[:6000]
                 except Exception:
                     content = ""
         lines = []
@@ -707,11 +707,237 @@ class DcsWhosinPlugin(Star):
             title = clean(item.get("title"))
             summary = clean(item.get("summary") or item.get("snippet"))
             link = str(item.get("url") or "").strip()
-            lines.append(f"- {title}\n  {summary[:300]}\n  {link}")
+            lines.append(f"- {title}\n  {summary[:500]}\n  {link}")
         text = "萌娘百科查询结果：\n" + "\n".join(lines)
         if content:
             text += "\n\n词条正文节选：\n" + content
-        text += "\n（请用自己的话简短回答，不要照抄；以词条内容为准）"
+        text += "\n（请尽量详细、准确地把词条内容转述给用户，不要照抄；以词条内容为准）"
+        return text
+
+    @staticmethod
+    def _html_to_text(html: str) -> str:
+        html = re.sub(r"(?is)<(script|style|noscript)[^>]*>.*?</\1>", " ", html)
+        html = re.sub(r"(?is)<!--.*?-->", " ", html)
+        html = re.sub(r"(?s)<[^>]+>", " ", html)
+        return re.sub(r"\s+", " ", html).strip()
+
+    def _search_key(self) -> str:
+        provider = self.context.get_provider_by_id("deepseek")
+        if provider is not None:
+            keys = provider.provider_config.get("key") or []
+            if keys:
+                return str(keys[0])
+        return ""
+
+    async def _load_chart_data(self, game: str):
+        cache = self.plugin_data_dir / f"chart_data_{game}.json"
+        try:
+            if cache.exists() and time.time() - cache.stat().st_mtime < 86400:
+                return json.loads(cache.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        probe = "maimaidxprober" if game == "maimai" else "chunithmprober"
+        url = f"https://www.diving-fish.com/api/{probe}/music_data"
+        import aiohttp
+
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=45)) as session:
+                async with session.get(url, headers={"User-Agent": "Mozilla/5.0"}) as resp:
+                    if resp.status != 200:
+                        return None
+                    data = await resp.json()
+        except Exception:
+            return None
+        if not isinstance(data, list) or not data:
+            return None
+        try:
+            self.plugin_data_dir.mkdir(parents=True, exist_ok=True)
+            cache.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+        return data
+
+    async def _fetch_any_page(self, session, url: str, key: str) -> str:
+        if "wikiwiki.jp" in url or "sega.jp" in url:
+            try:
+                async with session.get(url, headers={"User-Agent": "Mozilla/5.0"}) as resp:
+                    if resp.status == 200:
+                        return self._html_to_text(await resp.text(errors="ignore"))
+            except Exception:
+                pass
+        try:
+            async with session.post(
+                "https://api.deepseek.com/v1/tools/fetch",
+                headers={"Authorization": f"Bearer {key}"},
+                json={"url": url},
+            ) as resp:
+                if resp.status == 200:
+                    page = await resp.json()
+                    return str(page.get("content") or "")
+        except Exception:
+            pass
+        return ""
+
+    @llm_tool(name="rhythm_lookup")
+    async def rhythm_lookup(self, event: AstrMessageEvent, keyword: str, game: str = "maimai"):
+        '''查询音游（CHUNITHM/中二节奏、maimai/舞萌DX）的角色、曲目与活动资料。
+
+        会优先检索对应 WIKI 与官方站点并抓取正文。
+
+        Args:
+            keyword(string): 角色名、曲名或关键词
+            game(string): 游戏名，填 chunithm 或 maimai，默认 maimai
+        '''
+        key = self._search_key()
+        if not key:
+            return "音游资料查询暂时不可用：未找到 DeepSeek 密钥。"
+        game = str(game or "").strip().lower()
+        if game not in ("chunithm", "maimai"):
+            game = "maimai"
+        cn = "中二节奏" if game == "chunithm" else "舞萌DX"
+        sites = (
+            "site:wikiwiki.jp/chunithmwiki OR site:chunithm.sega.jp"
+            if game == "chunithm"
+            else "site:wikiwiki.jp/maimai OR site:maimai.sega.jp"
+        )
+        keyword = str(keyword or "").strip()[:40]
+        if not keyword:
+            return "查询关键词为空。"
+        import aiohttp
+
+        async def run_query(session, query):
+            try:
+                async with session.post(
+                    "https://api.deepseek.com/v1/tools/search",
+                    headers={"Authorization": f"Bearer {key}"},
+                    json={"query": query, "count": 6},
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return data.get("results") or []
+            except Exception:
+                pass
+            return []
+
+        results = []
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=45)) as session:
+            results = await run_query(session, f"{keyword} {sites}")
+            if not results:
+                results = await run_query(session, f"{keyword} {cn} wiki")
+            if not results:
+                return f"{cn}的「{keyword}」没有查到相关资料。"
+            pick = next(
+                (str(i.get("url") or "") for i in results if "wikiwiki.jp" in str(i.get("url") or "")),
+                "",
+            ) or str(results[0].get("url") or "")
+            snippet_lines = []
+            for item in results[:3]:
+                title = re.sub(r"<[^>]+>", "", str(item.get("title") or "")).strip()
+                summary = re.sub(r"<[^>]+>", "", str(item.get("summary") or item.get("snippet") or "")).strip()
+                snippet_lines.append(f"- {title}\n  {summary[:300]}\n  {item.get('url') or ''}")
+            content = await self._fetch_any_page(session, pick, key) if pick else ""
+        text = f"{cn}相关资料：\n" + "\n".join(snippet_lines)
+        if content:
+            text += "\n\n页面正文节选：\n" + content[:6000]
+        text += "\n（请尽量详细、准确地把资料转述给用户，不要照抄；数字与设定以资料为准）"
+        return text
+
+    @llm_tool(name="chart_lookup")
+    async def chart_lookup(self, event: AstrMessageEvent, keyword: str, game: str = "maimai"):
+        '''查询音游谱面信息（难度、定数、物量、谱师）。
+
+        数据来自水鱼查分器曲库，覆盖 maimai/舞萌DX 与 CHUNITHM/中二节奏。
+
+        Args:
+            keyword(string): 曲名（可部分匹配）
+            game(string): 游戏名，填 chunithm 或 maimai，默认 maimai
+        '''
+        game = str(game or "").strip().lower()
+        if game not in ("chunithm", "maimai"):
+            game = "maimai"
+        keyword = str(keyword or "").strip()
+        if not keyword:
+            return "查询关键词为空。"
+        data = await self._load_chart_data(game)
+        if data is None:
+            key = self._search_key()
+            if not key:
+                return "谱面查询暂时不可用：曲库获取失败。"
+            cn = "中二节奏" if game == "chunithm" else "舞萌DX"
+            import aiohttp
+
+            try:
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+                    async with session.post(
+                        "https://api.deepseek.com/v1/tools/search",
+                        headers={"Authorization": f"Bearer {key}"},
+                        json={"query": f"{keyword} {cn} 谱面 定数", "count": 4},
+                    ) as resp:
+                        if resp.status == 200:
+                            payload = await resp.json()
+                            items = payload.get("results") or []
+                            lines = [
+                                f"- {re.sub(r'<[^>]+>', '', str(i.get('title') or '')).strip()}\n  {str(i.get('summary') or i.get('snippet') or '')[:300]}\n  {i.get('url') or ''}"
+                                for i in items[:3]
+                            ]
+                            return "曲库不可用，按搜索给出的谱面信息：\n" + "\n".join(lines)
+            except Exception:
+                pass
+            return "谱面查询暂时不可用，请稍后再试。"
+        kw = keyword.lower()
+        hits = []
+        for item in data:
+            title = str(item.get("title") or "").lower()
+            if not title:
+                continue
+            if kw == str(item.get("id") or "").lower() or kw in title or title in kw:
+                hits.append(item)
+            if len(hits) >= 6:
+                break
+        if not hits:
+            return f"曲库里没找到「{keyword}」，可以试试更短的关键词。"
+        diff_names = ("BASIC", "ADVANCED", "EXPERT", "MASTER", "ULTIMA", "Re:MASTER")
+        out = []
+        for item in hits[:3]:
+            info = item.get("basic_info") or {}
+            title = str(item.get("title") or info.get("title") or "")
+            head = [f"《{title}》"]
+            meta = []
+            if game == "maimai" and item.get("type"):
+                meta.append(str(item.get("type")))
+            if info.get("artist"):
+                meta.append(f"作者：{info.get('artist')}")
+            if info.get("bpm"):
+                meta.append(f"BPM {info.get('bpm')}")
+            if info.get("from"):
+                meta.append(str(info.get("from")))
+            if meta:
+                head.append(" | ".join(meta))
+            ds = item.get("ds") or []
+            levels = item.get("level") or []
+            charts = item.get("charts") or []
+            rows = []
+            for idx, level in enumerate(levels[:6]):
+                name = diff_names[idx] if idx < len(diff_names) else f"难度{idx}"
+                if game == "maimai" and idx == 4:
+                    name = "Re:MASTER"
+                if game == "chunithm" and idx == 4:
+                    name = "ULTIMA"
+                d = ds[idx] if idx < len(ds) else ""
+                row = f"  {name}: {level}"
+                if d not in (None, "", 0, 0.0):
+                    row += f"（定数 {d}）"
+                chart = charts[idx] if idx < len(charts) else {}
+                notes = chart.get("notes")
+                if isinstance(notes, list) and len(notes) >= 5:
+                    row += f" | TAP {notes[0]} / HOLD {notes[1]} / SLIDE {notes[2]} / TOUCH {notes[3]} / BREAK {notes[4]}"
+                if chart.get("charter"):
+                    row += f" | 谱师：{chart.get('charter')}"
+                if row.strip():
+                    rows.append(row)
+            out.append("\n".join(head + rows))
+        text = "谱面信息（数据来自水鱼查分器曲库）：\n\n" + "\n\n".join(out)
+        text += "\n（请把难度、定数、物量等信息准确地告诉用户；没有的难度不要编）"
         return text
 
     def _policy_allows(self, event: AstrMessageEvent) -> bool:
