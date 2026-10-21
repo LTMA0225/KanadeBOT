@@ -1265,53 +1265,79 @@ class DcsWhosinPlugin(Star):
             min_n = int(self.config.get("ltm_min_messages", 30) or 30)
         except (TypeError, ValueError):
             min_n = 30
+        try:
+            chunk_size = int(self.config.get("ltm_chunk_messages", 300) or 300)
+        except (TypeError, ValueError):
+            chunk_size = 300
+        chunk_size = max(50, min(chunk_size, 800))
         logs = self._load_group_log()
         state = self._load_memory_state()
         last_ts = float(state.get("last_ts") or 0)
         fresh = [r for r in logs if float(r.get("ts") or 0) > last_ts]
+        fresh.sort(key=lambda r: float(r.get("ts") or 0))
         if len(fresh) < max(1, min_n):
             return f"新消息不足（{len(fresh)}/{min_n}），暂不汇总"
         umo = str(fresh[0].get("umo") or "")
         provider = await self.context.get_using_provider_async(umo)
         if provider is None:
             return "没有可用的对话模型，暂时无法汇总"
-        old = self._load_memory()
-        old_text = "\n".join(f"- {ln}" for ln in old) if old else "（空）"
-        transcript = "\n".join(
-            f"[{str(r.get('name') or '')}] {str(r.get('text') or '')}" for r in fresh[-300:]
-        )
-        prompt = (
-            "你是群聊记忆整理助手。请根据旧记忆和新聊天记录，输出更新后的长期记忆。\n"
-            "规则：\n"
-            "1. 只保留长期有价值的信息：群规与店铺常识、常见问答、群内黑话和梗、常驻成员的称呼与特点\n"
-            "2. 不要记录临时聊天、寒暄、隐私（手机号、真实姓名、住址）、一次性活动\n"
-            "3. 旧记忆可以合并、去重、修正，过时的直接删掉\n"
-            "4. 只输出记忆条目，每行一条，以「- 」开头，每条不超过 50 字，最多 60 条，不要任何解释\n\n"
-            f"【旧记忆】\n{old_text}\n\n【新聊天记录】\n{transcript}"
-        )
-        try:
-            resp = await provider.text_chat(
-                prompt=prompt,
-                contexts=[],
-                session_id=f"dcs_ltm_{int(time.time())}",
-                persist=False,
+        memory = self._load_memory()
+        processed = 0
+        chunk_total = (len(fresh) + chunk_size - 1) // chunk_size
+        for idx in range(0, len(fresh), chunk_size):
+            chunk = fresh[idx : idx + chunk_size]
+            old_text = "\n".join(f"- {ln}" for ln in memory) if memory else "（空）"
+            transcript = "\n".join(
+                f"[{str(r.get('name') or '')}] {str(r.get('text') or '')}" for r in chunk
             )
-        except Exception as exc:
-            return f"汇总失败：{exc!r}"
-        text = str(getattr(resp, "completion_text", "") or "")
-        bullets = []
-        for ln in text.splitlines():
-            ln = re.sub(r"^[-*•·]\s*", "", ln.strip())
-            if ln:
-                bullets.append(ln[:80])
-        bullets = bullets[:60]
-        if not bullets:
-            return "汇总结果为空，稍后再试"
-        self._save_memory(bullets)
-        max_ts = max(float(r.get("ts") or 0) for r in fresh)
-        self._save_memory_state({"last_ts": max_ts, "updated": time.strftime("%Y-%m-%d %H:%M")})
-        logger.info(f"[dcs_whosin] 长期记忆已更新：{len(fresh)} 条新消息 → {len(bullets)} 条记忆")
-        return f"长期记忆已更新（{len(fresh)} 条消息 → {len(bullets)} 条记忆）"
+            prompt = (
+                "你是群聊记忆整理助手。请根据旧记忆和这一段新聊天记录，输出更新后的长期记忆。\n"
+                "规则：\n"
+                "1. 只保留长期有价值的信息：群规与店铺常识、常见问答、群内黑话和梗、常驻成员的称呼与特点\n"
+                "2. 不要记录临时聊天、寒暄、隐私（手机号、真实姓名、住址）、一次性活动\n"
+                "3. 旧记忆可以合并、去重、修正，过时的直接删掉\n"
+                "4. 只输出记忆条目，每行一条，以「- 」开头，每条不超过 50 字，最多 60 条，不要任何解释\n\n"
+                f"【旧记忆】\n{old_text}\n\n【本段聊天记录】\n{transcript}"
+            )
+            try:
+                resp = await provider.text_chat(
+                    prompt=prompt,
+                    contexts=[],
+                    session_id=f"dcs_ltm_{int(time.time())}_{idx}",
+                    persist=False,
+                )
+            except Exception as exc:
+                if processed:
+                    self._save_memory_state(
+                        {
+                            "last_ts": max(float(r.get("ts") or 0) for r in fresh[:processed]),
+                            "updated": time.strftime("%Y-%m-%d %H:%M"),
+                        }
+                    )
+                    return f"汇总部分完成（{processed}/{len(fresh)} 条后失败：{exc!r}）"
+                return f"汇总失败：{exc!r}"
+            text = str(getattr(resp, "completion_text", "") or "")
+            bullets = []
+            for ln in text.splitlines():
+                ln = re.sub(r"^[-*•·]\s*", "", ln.strip())
+                if ln:
+                    bullets.append(ln[:80])
+            bullets = bullets[:60]
+            if not bullets:
+                return f"第 {idx // chunk_size + 1}/{chunk_total} 段汇总为空，稍后再试（已处理 {processed} 条）"
+            memory = bullets
+            processed += len(chunk)
+            self._save_memory(memory)
+            self._save_memory_state(
+                {
+                    "last_ts": max(float(r.get("ts") or 0) for r in chunk),
+                    "updated": time.strftime("%Y-%m-%d %H:%M"),
+                }
+            )
+        logger.info(
+            f"[dcs_whosin] 长期记忆已更新：{processed} 条新消息（{chunk_total} 段） → {len(memory)} 条记忆"
+        )
+        return f"长期记忆已更新（{processed} 条消息，{chunk_total} 段 → {len(memory)} 条记忆）"
 
     async def _ltm_loop(self) -> None:
         await asyncio.sleep(30)

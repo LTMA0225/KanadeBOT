@@ -267,6 +267,11 @@
     "type": "int",
     "default": 30
   },
+  "ltm_chunk_messages": {
+    "description": "分段汇总时每段的消息条数（窗口内超出的会分段全部处理）",
+    "type": "int",
+    "default": 300
+  },
   "ltm_inject_max_chars": {
     "description": "每次对话注入记忆的最大字符数",
     "type": "int",
