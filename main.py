@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 from astrbot.api import AstrBotConfig, llm_tool, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image, Plain
+from astrbot.api.platform import MessageType
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.message.message_event_result import MessageChain
 
@@ -166,6 +167,8 @@ class DcsWhosinPlugin(Star):
         self._attend_last: dict[str, float] = {}
         self._bind_last: dict[str, float] = {}
         self._bookings: list[dict] = []
+        self._ltm_task: asyncio.Task | None = None
+        self._ltm_injected_once = False
         self._pricing: dict | None = None
         self._pricing_at = 0.0
         self._pricing_default_logged = False
@@ -195,6 +198,10 @@ class DcsWhosinPlugin(Star):
         if self._presence_task is None or self._presence_task.done():
             self._presence_task = asyncio.create_task(self._presence_loop())
             logger.info("[dcs_whosin] 进离店播报任务已启动。")
+        if self.config.get("ltm_enable", True):
+            if self._ltm_task is None or self._ltm_task.done():
+                self._ltm_task = asyncio.create_task(self._ltm_loop())
+                logger.info("[dcs_whosin] 长期记忆任务已启动。")
         if self.config.get("mj_enable", True):
             if self._mj_task is None or self._mj_task.done():
                 self._mj_task = asyncio.create_task(self._mj_prefetch())
@@ -623,6 +630,56 @@ class DcsWhosinPlugin(Star):
             f"余额：{balance} 点"
         )
 
+    @filter.platform_adapter_type(filter.PlatformAdapterType.ALL)
+    async def record_group_message(self, event: AstrMessageEvent):
+        if not self.config.get("ltm_enable", True):
+            return
+        try:
+            if event.get_message_type() != MessageType.GROUP_MESSAGE:
+                return
+            group_id = str(event.get_group_id() or "").strip()
+            groups = _as_list(self.config.get("allowed_groups"))
+            if groups and group_id not in groups:
+                return
+        except Exception:
+            return
+        text = str(event.get_message_str() or "").strip()
+        if not text:
+            if not any(isinstance(c, Image) for c in event.get_messages()):
+                return
+            text = "[图片]"
+        if text.startswith("/"):
+            return
+        self._append_group_log(
+            {
+                "ts": time.time(),
+                "umo": event.unified_msg_origin,
+                "name": str(event.get_sender_name() or ""),
+                "text": text[:300],
+            }
+        )
+
+    @filter.regex(r"^/?memory\b|^/?记忆\b")
+    async def memory_cmd(self, event: AstrMessageEvent):
+        if not event.is_at_or_wake_command:
+            return
+        if not self._policy_allows(event):
+            return
+        if not await self._is_points_admin(event):
+            yield event.plain_result("这个指令只有管理员和群主能用哦")
+            return
+        arg = re.sub(r"^/?memory\b|^/?记忆\b", "", event.get_message_str().strip()).strip().lower()
+        if arg in ("now", "立即", "汇总"):
+            msg = await self._run_memory_summary()
+            yield event.plain_result(msg)
+            return
+        memory = self._load_memory()
+        if not memory:
+            yield event.plain_result("还没有长期记忆（发 /memory now 可立即汇总一次）")
+            return
+        body = "\n".join(f"- {m}" for m in memory[:40])
+        yield event.plain_result("【长期记忆】\n" + body[:1200])
+
     @filter.on_llm_request()
     async def inject_admin_fact(self, event: AstrMessageEvent, req):
         qq = str(self.config.get("main_admin_qq", "3565630243") or "").strip()
@@ -655,6 +712,22 @@ class DcsWhosinPlugin(Star):
             "不要编造或改动数字与名字；被问及管理员时，拿不准就回答「店主就在群里呀」，"
             "绝不要说出其他 QQ；不要复述本条提醒。</system_reminder>"
         )
+        if self.config.get("ltm_enable", True) and "长期群记忆" not in (req.system_prompt or ""):
+            memory = self._load_memory()
+            if memory:
+                try:
+                    max_chars = int(self.config.get("ltm_inject_max_chars", 2000) or 2000)
+                except (TypeError, ValueError):
+                    max_chars = 2000
+                body = "\n".join(f"- {m}" for m in memory)[: max(200, max_chars)]
+                req.system_prompt += (
+                    "\n<system_reminder>长期群记忆（供参考，与本轮对话冲突时以本轮为准；不要逐条复述）：\n"
+                    + body
+                    + "\n</system_reminder>"
+                )
+                if not self._ltm_injected_once:
+                    self._ltm_injected_once = True
+                    logger.info(f"[dcs_whosin] 长期记忆已注入（{len(memory)} 条）")
 
     @llm_tool(name="web_search")
     async def web_search(self, event: AstrMessageEvent, query: str):
@@ -1102,6 +1175,162 @@ class DcsWhosinPlugin(Star):
             temp.replace(path)
         except Exception as exc:
             logger.warning(f"[dcs_whosin] 包场记录保存失败：{exc!r}")
+
+    def _group_log_file(self) -> Path:
+        return self.plugin_data_dir / "group_log.jsonl"
+
+    def _memory_file(self) -> Path:
+        return self.plugin_data_dir / "long_term_memory.txt"
+
+    def _memory_state_file(self) -> Path:
+        return self.plugin_data_dir / "long_term_memory_state.json"
+
+    def _append_group_log(self, record: dict) -> None:
+        try:
+            self.plugin_data_dir.mkdir(parents=True, exist_ok=True)
+            path = self._group_log_file()
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            if path.stat().st_size > 2 * 1024 * 1024:
+                lines = path.read_text(encoding="utf-8").splitlines()[-3000:]
+                path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except Exception as exc:
+            logger.warning(f"[dcs_whosin] 群消息记录失败：{exc!r}")
+
+    def _load_group_log(self) -> list[dict]:
+        try:
+            path = self._group_log_file()
+            if not path.exists():
+                return []
+            out = []
+            for line in path.read_text(encoding="utf-8").splitlines():
+                try:
+                    item = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(item, dict) and item.get("text"):
+                    out.append(item)
+            return out
+        except Exception:
+            return []
+
+    def _load_memory(self) -> list[str]:
+        try:
+            path = self._memory_file()
+            if path.exists():
+                lines = []
+                for ln in path.read_text(encoding="utf-8").splitlines():
+                    ln = ln.strip()
+                    if not ln:
+                        continue
+                    lines.append(ln[2:].strip() if ln.startswith("- ") else ln)
+                return lines
+        except Exception:
+            pass
+        return []
+
+    def _save_memory(self, lines: list[str]) -> None:
+        try:
+            self.plugin_data_dir.mkdir(parents=True, exist_ok=True)
+            path = self._memory_file()
+            temp = path.with_suffix(".tmp")
+            temp.write_text("\n".join(f"- {ln}" for ln in lines) + "\n", encoding="utf-8")
+            temp.replace(path)
+        except Exception as exc:
+            logger.warning(f"[dcs_whosin] 长期记忆保存失败：{exc!r}")
+
+    def _load_memory_state(self) -> dict:
+        try:
+            path = self._memory_state_file()
+            if path.exists():
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            pass
+        return {}
+
+    def _save_memory_state(self, state: dict) -> None:
+        try:
+            self.plugin_data_dir.mkdir(parents=True, exist_ok=True)
+            path = self._memory_state_file()
+            temp = path.with_suffix(".tmp")
+            temp.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+            temp.replace(path)
+        except Exception:
+            pass
+
+    async def _run_memory_summary(self) -> str:
+        try:
+            min_n = int(self.config.get("ltm_min_messages", 30) or 30)
+        except (TypeError, ValueError):
+            min_n = 30
+        logs = self._load_group_log()
+        state = self._load_memory_state()
+        last_ts = float(state.get("last_ts") or 0)
+        fresh = [r for r in logs if float(r.get("ts") or 0) > last_ts]
+        if len(fresh) < max(1, min_n):
+            return f"新消息不足（{len(fresh)}/{min_n}），暂不汇总"
+        umo = str(fresh[0].get("umo") or "")
+        provider = await self.context.get_using_provider_async(umo)
+        if provider is None:
+            return "没有可用的对话模型，暂时无法汇总"
+        old = self._load_memory()
+        old_text = "\n".join(f"- {ln}" for ln in old) if old else "（空）"
+        transcript = "\n".join(
+            f"[{str(r.get('name') or '')}] {str(r.get('text') or '')}" for r in fresh[-300:]
+        )
+        prompt = (
+            "你是群聊记忆整理助手。请根据旧记忆和新聊天记录，输出更新后的长期记忆。\n"
+            "规则：\n"
+            "1. 只保留长期有价值的信息：群规与店铺常识、常见问答、群内黑话和梗、常驻成员的称呼与特点\n"
+            "2. 不要记录临时聊天、寒暄、隐私（手机号、真实姓名、住址）、一次性活动\n"
+            "3. 旧记忆可以合并、去重、修正，过时的直接删掉\n"
+            "4. 只输出记忆条目，每行一条，以「- 」开头，每条不超过 50 字，最多 60 条，不要任何解释\n\n"
+            f"【旧记忆】\n{old_text}\n\n【新聊天记录】\n{transcript}"
+        )
+        try:
+            resp = await provider.text_chat(
+                prompt=prompt,
+                contexts=[],
+                session_id=f"dcs_ltm_{int(time.time())}",
+                persist=False,
+            )
+        except Exception as exc:
+            return f"汇总失败：{exc!r}"
+        text = str(getattr(resp, "completion_text", "") or "")
+        bullets = []
+        for ln in text.splitlines():
+            ln = re.sub(r"^[-*•·]\s*", "", ln.strip())
+            if ln:
+                bullets.append(ln[:80])
+        bullets = bullets[:60]
+        if not bullets:
+            return "汇总结果为空，稍后再试"
+        self._save_memory(bullets)
+        max_ts = max(float(r.get("ts") or 0) for r in fresh)
+        self._save_memory_state({"last_ts": max_ts, "updated": time.strftime("%Y-%m-%d %H:%M")})
+        logger.info(f"[dcs_whosin] 长期记忆已更新：{len(fresh)} 条新消息 → {len(bullets)} 条记忆")
+        return f"长期记忆已更新（{len(fresh)} 条消息 → {len(bullets)} 条记忆）"
+
+    async def _ltm_loop(self) -> None:
+        await asyncio.sleep(30)
+        try:
+            await self._run_memory_summary()
+        except Exception as exc:
+            logger.warning(f"[dcs_whosin] 记忆汇总失败：{exc!r}")
+        while True:
+            try:
+                hours = float(self.config.get("ltm_interval_hours", 12) or 12)
+            except (TypeError, ValueError):
+                hours = 12
+            await asyncio.sleep(max(1.0, min(hours, 168.0)) * 3600)
+            try:
+                await self._run_memory_summary()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(f"[dcs_whosin] 记忆汇总失败：{exc!r}")
 
     def _points_file(self) -> Path:
         return self.plugin_data_dir / "points.json"
@@ -1604,7 +1833,7 @@ class DcsWhosinPlugin(Star):
         }
 
     async def terminate(self):
-        for task in (self._status_task, self._deps_task, self._presence_task, self._mj_task):
+        for task in (self._status_task, self._deps_task, self._presence_task, self._mj_task, self._ltm_task):
             if task and not task.done():
                 task.cancel()
         await self.renderer.close()

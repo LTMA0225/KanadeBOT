@@ -1,8 +1,8 @@
 name: astrbot_plugin_dcs_whosin
 display_name: 音游窝查询机器人
-desc: 查询音游窝店内实时在店人员（站点统一 Bot API），本机渲染宵崎奏主题卡片（背景宵崎奏 + 萌感字体站酷快乐体）+ 文本返回；自动播报玩家进店/离店（含时长与扣费）；支持 @bot 自助离店、/bd QQ 绑定与包场（包机）管理（包场时段 /j 改为包场提示）；/j 查询前会先说一句过场台词（可自定义/关闭）；内置联网搜索（web_search）、萌娘百科词条查询（moegirl_lookup）、音游资料查询（rhythm_lookup：CHUNITHM/maimai WIKI 与官网）与谱面查询（chart_lookup：水鱼查分器曲库）；管理员可用 /bz 为指定 QQ 增点并显示余额；附带 25h、时段价格（jg）与收藏表情（mj）指令。
-short_desc: 音游窝在店查询（/j，含过场台词）+ 进离店播报 + @bot 自助离店 + /bd 绑定 + 包场管理 + 联网搜索 + 萌娘百科 + 音游资料/谱面查询 + /bz 增点 + /jg + /mj + /25h
-version: v3.6.1
+desc: 查询音游窝店内实时在店人员（站点统一 Bot API），本机渲染宵崎奏主题卡片（背景宵崎奏 + 萌感字体站酷快乐体）+ 文本返回；自动播报玩家进店/离店（含时长与扣费）；支持 @bot 自助离店、/bd QQ 绑定与包场（包机）管理（包场时段 /j 改为包场提示）；/j 查询前会先说一句过场台词（可自定义/关闭）；内置联网搜索（web_search）、萌娘百科词条查询（moegirl_lookup）、音游资料查询（rhythm_lookup：CHUNITHM/maimai WIKI 与官网）与谱面查询（chart_lookup：水鱼查分器曲库）；长期记忆：定时蒸馏群聊常识并注入对话；管理员可用 /bz 增点、/memory 查看记忆；附带 25h、时段价格（jg）与收藏表情（mj）指令。
+short_desc: 音游窝在店查询（/j，含过场台词）+ 进离店播报 + @bot 自助离店 + /bd 绑定 + 包场管理 + 联网搜索 + 萌娘百科 + 音游资料/谱面查询 + 长期记忆 + /bz 增点 + /memory + /jg + /mj + /25h
+version: v3.7.0
 author: 音游窝
 support_platforms:
   - aiocqhttp

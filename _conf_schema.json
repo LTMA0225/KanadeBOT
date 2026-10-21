@@ -251,5 +251,25 @@
     "description": "唯一管理员/老板的 QQ（每次对话都会作为权威事实注入，避免认错人）",
     "type": "string",
     "default": "3565630243"
+  },
+  "ltm_enable": {
+    "description": "长期记忆：记录群聊并定时蒸馏成长期记忆，每次对话注入",
+    "type": "bool",
+    "default": true
+  },
+  "ltm_interval_hours": {
+    "description": "长期记忆自动汇总间隔（小时）",
+    "type": "int",
+    "default": 12
+  },
+  "ltm_min_messages": {
+    "description": "至少积累多少条新消息才汇总",
+    "type": "int",
+    "default": 30
+  },
+  "ltm_inject_max_chars": {
+    "description": "每次对话注入记忆的最大字符数",
+    "type": "int",
+    "default": 2000
   }
 }
