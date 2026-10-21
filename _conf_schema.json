@@ -246,5 +246,10 @@
     "description": "可使用 /bz 增点的额外 QQ（本群群主自动可用）",
     "type": "list",
     "default": ["3565630243"]
+  },
+  "main_admin_qq": {
+    "description": "唯一管理员/老板的 QQ（每次对话都会作为权威事实注入，避免认错人）",
+    "type": "string",
+    "default": "3565630243"
   }
 }
