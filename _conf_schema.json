@@ -272,9 +272,24 @@
     "type": "int",
     "default": 300
   },
+  "ltm_max_items": {
+    "description": "长期记忆最多保留条数",
+    "type": "int",
+    "default": 120
+  },
   "ltm_inject_max_chars": {
     "description": "每次对话注入记忆的最大字符数",
     "type": "int",
-    "default": 2000
+    "default": 3500
+  },
+  "private_chat_whitelist": {
+    "description": "允许私聊使用机器人功能的 QQ（好友/白名单）",
+    "type": "list",
+    "default": ["2380600076"]
+  },
+  "close_friends": {
+    "description": "管理员的亲密好友 QQ（对话中会识别并更亲切）",
+    "type": "list",
+    "default": ["2380600076"]
   }
 }

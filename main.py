@@ -690,6 +690,8 @@ class DcsWhosinPlugin(Star):
         sender = str(event.get_sender_id() or "").strip()
         role = "是管理员本人" if sender == qq else "不是管理员"
         owner_note = ""
+        if sender and sender != qq and sender in _as_list(self.config.get("close_friends")):
+            owner_note += "（ta 是管理员非常好的朋友，可以更亲切、信任一些）"
         bot = getattr(event, "bot", None)
         group_id = str(event.get_group_id() or "").strip()
         if bot is not None and group_id.isdigit() and sender.isdigit():
@@ -1098,7 +1100,10 @@ class DcsWhosinPlugin(Star):
 
     def _policy_allows(self, event: AstrMessageEvent) -> bool:
         if event.is_private_chat():
-            return bool(self.config.get("allow_private_chat", False))
+            if bool(self.config.get("allow_private_chat", False)):
+                return True
+            sender = str(event.get_sender_id() or "").strip()
+            return sender in _as_list(self.config.get("private_chat_whitelist"))
 
         group_id = str(event.get_group_id() or "")
         if not group_id:
@@ -1270,6 +1275,11 @@ class DcsWhosinPlugin(Star):
         except (TypeError, ValueError):
             chunk_size = 300
         chunk_size = max(50, min(chunk_size, 800))
+        try:
+            max_items = int(self.config.get("ltm_max_items", 120) or 120)
+        except (TypeError, ValueError):
+            max_items = 120
+        max_items = max(20, min(max_items, 300))
         logs = self._load_group_log()
         state = self._load_memory_state()
         last_ts = float(state.get("last_ts") or 0)
@@ -1296,7 +1306,8 @@ class DcsWhosinPlugin(Star):
                 "1. 只保留长期有价值的信息：群规与店铺常识、常见问答、群内黑话和梗、常驻成员的称呼与特点\n"
                 "2. 不要记录临时聊天、寒暄、隐私（手机号、真实姓名、住址）、一次性活动\n"
                 "3. 旧记忆可以合并、去重、修正，过时的直接删掉\n"
-                "4. 只输出记忆条目，每行一条，以「- 」开头，每条不超过 50 字，最多 60 条，不要任何解释\n\n"
+                "4. 只输出记忆条目，每行一条，以「- 」开头，每条不超过 50 字，最多 "
+                f"{max_items} 条，不要任何解释\n\n"
                 f"【旧记忆】\n{old_text}\n\n【本段聊天记录】\n{transcript}"
             )
             try:
@@ -1322,7 +1333,7 @@ class DcsWhosinPlugin(Star):
                 ln = re.sub(r"^[-*•·]\s*", "", ln.strip())
                 if ln:
                     bullets.append(ln[:80])
-            bullets = bullets[:60]
+            bullets = bullets[:max_items]
             if not bullets:
                 return f"第 {idx // chunk_size + 1}/{chunk_total} 段汇总为空，稍后再试（已处理 {processed} 条）"
             memory = bullets
