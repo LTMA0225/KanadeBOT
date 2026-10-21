@@ -573,6 +573,56 @@ class DcsWhosinPlugin(Star):
         logger.info(f"[dcs_whosin] 包场取消：{len(removed)} 条（关键词={keyword or '全部'}）")
         yield event.plain_result("\n".join(lines))
 
+    @filter.regex(r"^/?bz\b")
+    async def points_add(self, event: AstrMessageEvent):
+        if not event.is_at_or_wake_command:
+            return
+        if not self._policy_allows(event):
+            return
+        if not await self._is_points_admin(event):
+            yield event.plain_result("这个指令只有管理员和群主能用哦")
+            return
+        m = re.match(r"^/?bz\s+(\d{5,12})\s+(\d{1,7})\s*$", event.get_message_str().strip())
+        if not m:
+            yield event.plain_result("用法：@机器人 /bz QQ号 点数（例：/bz 123456789 100）")
+            return
+        target_qq = m.group(1)
+        amount = int(m.group(2))
+        if amount <= 0 or amount > 1000000:
+            yield event.plain_result("点数需要在 1 ~ 1000000 之间")
+            return
+        points = self._load_points()
+        balance = int(points.get(target_qq, 0) or 0) + amount
+        points[target_qq] = balance
+        self._save_points(points)
+        name = target_qq
+        bot = getattr(event, "bot", None)
+        group_id = str(event.get_group_id() or "").strip()
+        if bot is not None and group_id.isdigit():
+            try:
+                info = await bot.call_action(
+                    "get_group_member_info",
+                    group_id=int(group_id),
+                    user_id=int(target_qq),
+                    no_cache=False,
+                )
+                card = str((info or {}).get("card") or "").strip()
+                nick = str((info or {}).get("nickname") or "").strip()
+                name = card or nick or target_qq
+            except Exception:
+                pass
+        who = f"{name}（{target_qq}）" if name != target_qq else target_qq
+        logger.info(
+            f"[dcs_whosin] /bz 增点：{target_qq} +{amount} -> {balance}（操作者 {event.get_sender_id()}）"
+        )
+        prefix = str(self.config.get("presence_prefix", "【Kanade】") or "")
+        yield event.plain_result(
+            f"{prefix}已为该客户增点\n"
+            f"客户：{who}\n"
+            f"本次：+{amount} 点\n"
+            f"余额：{balance} 点"
+        )
+
     @llm_tool(name="web_search")
     async def web_search(self, event: AstrMessageEvent, query: str):
         '''联网搜索实时信息。
@@ -1019,6 +1069,52 @@ class DcsWhosinPlugin(Star):
             temp.replace(path)
         except Exception as exc:
             logger.warning(f"[dcs_whosin] 包场记录保存失败：{exc!r}")
+
+    def _points_file(self) -> Path:
+        return self.plugin_data_dir / "points.json"
+
+    def _load_points(self) -> dict:
+        try:
+            path = self._points_file()
+            if path.exists():
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return {str(k): int(v) for k, v in data.items()}
+        except Exception:
+            pass
+        return {}
+
+    def _save_points(self, points: dict) -> None:
+        try:
+            self.plugin_data_dir.mkdir(parents=True, exist_ok=True)
+            path = self._points_file()
+            temp = path.with_suffix(".tmp")
+            temp.write_text(json.dumps(points, ensure_ascii=False), encoding="utf-8")
+            temp.replace(path)
+        except Exception as exc:
+            logger.warning(f"[dcs_whosin] 点数保存失败：{exc!r}")
+
+    async def _is_points_admin(self, event: AstrMessageEvent) -> bool:
+        qq = str(event.get_sender_id() or "").strip()
+        if not qq.isdigit():
+            return False
+        if qq in _as_list(self.config.get("bz_admins", ["3565630243"])):
+            return True
+        bot = getattr(event, "bot", None)
+        group_id = str(event.get_group_id() or "").strip()
+        if bot is None or not group_id.isdigit():
+            return False
+        try:
+            info = await bot.call_action(
+                "get_group_member_info",
+                group_id=int(group_id),
+                user_id=int(qq),
+                no_cache=False,
+            )
+        except Exception as exc:
+            logger.warning(f"[dcs_whosin] /bz 查询群主身份失败：{exc!r}")
+            return False
+        return str((info or {}).get("role") or "") == "owner"
 
     async def _is_booking_admin(self, event: AstrMessageEvent) -> bool:
         qq = str(event.get_sender_id() or "").strip()

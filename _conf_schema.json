@@ -241,5 +241,10 @@
     "description": "过场台词与查询结果之间的停顿（毫秒，0=不停顿）",
     "type": "int",
     "default": 1500
+  },
+  "bz_admins": {
+    "description": "可使用 /bz 增点的额外 QQ（本群群主自动可用）",
+    "type": "list",
+    "default": ["3565630243"]
   }
 }
