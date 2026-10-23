@@ -632,6 +632,14 @@ class DcsWhosinPlugin(Star):
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL)
     async def record_group_message(self, event: AstrMessageEvent):
+        try:
+            if event.get_message_type() == MessageType.FRIEND_MESSAGE:
+                logger.info(
+                    f"[dcs_whosin] 收到私聊：qq={event.get_sender_id()} 内容={str(event.get_message_str() or '')[:60]}"
+                )
+                return
+        except Exception:
+            pass
         if not self.config.get("ltm_enable", True):
             return
         try:
