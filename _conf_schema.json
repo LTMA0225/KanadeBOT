@@ -291,5 +291,10 @@
     "description": "管理员的亲密好友 QQ（对话中会识别并更亲切）",
     "type": "list",
     "default": ["2380600076"]
+  },
+  "player_db_inject": {
+    "description": "把当前说话者的玩家档案注入对话（让回应更了解对方）",
+    "type": "bool",
+    "default": true
   }
 }

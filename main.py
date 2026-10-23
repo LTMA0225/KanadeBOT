@@ -169,6 +169,9 @@ class DcsWhosinPlugin(Star):
         self._bookings: list[dict] = []
         self._ltm_task: asyncio.Task | None = None
         self._ltm_injected_once = False
+        self._players: dict | None = None
+        self._players_saved_at = 0.0
+        self._players_dirty = False
         self._pricing: dict | None = None
         self._pricing_at = 0.0
         self._pricing_default_logged = False
@@ -658,6 +661,7 @@ class DcsWhosinPlugin(Star):
             text = "[图片]"
         if text.startswith("/"):
             return
+        self._touch_player(str(event.get_sender_id() or ""), str(event.get_sender_name() or ""))
         self._append_group_log(
             {
                 "ts": time.time(),
@@ -687,6 +691,43 @@ class DcsWhosinPlugin(Star):
             return
         body = "\n".join(f"- {m}" for m in memory[:40])
         yield event.plain_result("【长期记忆】\n" + body[:1200])
+
+    @filter.regex(r"^/?players\b|^/?玩家\b")
+    async def players_cmd(self, event: AstrMessageEvent):
+        if not event.is_at_or_wake_command:
+            return
+        if not self._policy_allows(event):
+            return
+        if not await self._is_points_admin(event):
+            yield event.plain_result("这个指令只有管理员和群主能用哦")
+            return
+        arg = re.sub(r"^/?players\b|^/?玩家\b", "", event.get_message_str().strip()).strip()
+        players = self._load_players()
+        if arg:
+            kw = arg.lower()
+            hits = [
+                (qq, r)
+                for qq, r in players.items()
+                if kw in (" ".join(str(n) for n in (r.get("names") or [])) + " " + str(qq)).lower()
+            ]
+            if not hits:
+                yield event.plain_result(f"档案库里没有「{arg}」")
+                return
+            hits.sort(key=lambda kv: -int(kv[1].get("count") or 0))
+            qq, r = hits[0]
+            names = "/".join(str(n) for n in (r.get("names") or [])[:2])
+            yield event.plain_result(
+                f"【玩家档案】{names}（{qq}）\n"
+                f"发言：{r.get('count', 0)} 条 | 标签：{'、'.join(str(t) for t in (r.get('tags') or []))}\n"
+                f"{str(r.get('profile') or '')[:600]}"
+            )
+            return
+        top = sorted(players.items(), key=lambda kv: -int(kv[1].get("count") or 0))[:15]
+        lines = [
+            f"· {'、'.join(str(n) for n in (r.get('names') or [])[:1])}（{qq}）{r.get('count', 0)} 条"
+            for qq, r in top
+        ]
+        yield event.plain_result(f"【档案库】共 {len(players)} 位玩家，活跃前 15：\n" + "\n".join(lines))
 
     @filter.on_llm_request()
     async def inject_admin_fact(self, event: AstrMessageEvent, req):
@@ -738,6 +779,15 @@ class DcsWhosinPlugin(Star):
                 if not self._ltm_injected_once:
                     self._ltm_injected_once = True
                     logger.info(f"[dcs_whosin] 长期记忆已注入（{len(memory)} 条）")
+        if self.config.get("player_db_inject", True) and "群友档案（参考" not in (req.system_prompt or ""):
+            players = self._load_players()
+            rec = players.get(sender) if sender else None
+            if isinstance(rec, dict):
+                profile = str(rec.get("profile") or "").strip()
+                if profile:
+                    req.system_prompt += (
+                        f"\n<system_reminder>群友档案（参考，不要直接复述）：{profile[:180]}</system_reminder>"
+                    )
 
     @llm_tool(name="web_search")
     async def web_search(self, event: AstrMessageEvent, query: str):
@@ -886,6 +936,38 @@ class DcsWhosinPlugin(Star):
         html = re.sub(r"(?is)<!--.*?-->", " ", html)
         html = re.sub(r"(?s)<[^>]+>", " ", html)
         return re.sub(r"\s+", " ", html).strip()
+
+    @llm_tool(name="player_lookup")
+    async def player_lookup(self, event: AstrMessageEvent, keyword: str):
+        '''查询群友档案（称呼、身份、常聊话题、性格特点）。
+
+        当需要了解某位群友、判断对方身份或与店里的关系时使用。
+
+        Args:
+            keyword(string): 群友称呼、名字的一部分或 QQ 号
+        '''
+        keyword = str(keyword or "").strip()
+        if not keyword:
+            return "查询关键词为空。"
+        players = self._load_players()
+        kw = keyword.lower()
+        hits = [
+            (qq, r)
+            for qq, r in players.items()
+            if kw in (" ".join(str(n) for n in (r.get("names") or [])) + " " + str(qq)).lower()
+        ]
+        if not hits:
+            return f"档案库里没有找到「{keyword}」。"
+        hits.sort(key=lambda kv: -int(kv[1].get("count") or 0))
+        lines = []
+        for qq, r in hits[:3]:
+            names = "、".join(str(n) for n in (r.get("names") or [])[:3])
+            tags = "、".join(str(t) for t in (r.get("tags") or []))
+            lines.append(
+                f"- {names}（QQ {qq}）发言 {r.get('count', 0)} 条\n"
+                f"  {str(r.get('profile') or '').strip()}\n  标签：{tags}"
+            )
+        return "群友档案：\n" + "\n".join(lines) + "\n（供参考，不要在回复里主动报出对方QQ）"
 
     def _search_key(self) -> str:
         provider = self.context.get_provider_by_id("deepseek")
@@ -1188,6 +1270,54 @@ class DcsWhosinPlugin(Star):
             temp.replace(path)
         except Exception as exc:
             logger.warning(f"[dcs_whosin] 包场记录保存失败：{exc!r}")
+
+    def _players_file(self) -> Path:
+        return self.plugin_data_dir / "players.json"
+
+    def _load_players(self) -> dict:
+        if self._players is not None:
+            return self._players
+        try:
+            path = self._players_file()
+            if path.exists():
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    self._players = data
+                    return self._players
+        except Exception:
+            pass
+        self._players = {}
+        return self._players
+
+    def _touch_player(self, qq: str, name: str) -> None:
+        if not qq or not qq.isdigit():
+            return
+        players = self._load_players()
+        rec = players.get(qq)
+        if not isinstance(rec, dict):
+            rec = {"names": [], "count": 0, "active_hours": [], "profile": "", "tags": [], "updated": ""}
+            players[qq] = rec
+        rec["count"] = int(rec.get("count") or 0) + 1
+        names = rec.get("names") if isinstance(rec.get("names"), list) else []
+        if name and name not in names:
+            names.append(name)
+            rec["names"] = names[-5:]
+        rec["last_seen"] = time.strftime("%Y-%m-%d %H:%M")
+        self._players_dirty = True
+        if time.time() - self._players_saved_at > 60:
+            self._save_players()
+
+    def _save_players(self) -> None:
+        try:
+            self.plugin_data_dir.mkdir(parents=True, exist_ok=True)
+            path = self._players_file()
+            temp = path.with_suffix(".tmp")
+            temp.write_text(json.dumps(self._load_players(), ensure_ascii=False, indent=1), encoding="utf-8")
+            temp.replace(path)
+            self._players_saved_at = time.time()
+            self._players_dirty = False
+        except Exception as exc:
+            logger.warning(f"[dcs_whosin] 玩家档案保存失败：{exc!r}")
 
     def _group_log_file(self) -> Path:
         return self.plugin_data_dir / "group_log.jsonl"
