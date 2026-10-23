@@ -882,6 +882,23 @@ class DcsWhosinPlugin(Star):
                 names = (rec2 or {}).get("names") or []
                 tag_name = str(names[-1]) if names else "未知"
             req.prompt = f"[说话者：{tag_name[:30]}（QQ:{sender or '未知'}）] {req.prompt}"
+        text_lower = str(event.message_str or "").lower()
+        if sender and any(
+            k in text_lower
+            for k in ("staff", "staffs", "店员", "士大夫", "店主", "群主", "管理员", "名单", "员工")
+        ):
+            roster2 = self._roster_line()
+            if roster2:
+                req.prompt = f"[店内人员：{roster2}]\n" + (req.prompt or "")
+                logger.info(f"[dcs_whosin] 名单已写入本轮用户消息（qq={sender}）")
+        if sender and any(
+            k in text_lower for k in ("我是谁", "我是什么", "认识我", "我的档案", "记不记得我")
+        ):
+            rec3 = self._load_players().get(sender)
+            if isinstance(rec3, dict):
+                prof3 = str(rec3.get("profile") or "").strip()
+                if prof3:
+                    req.prompt = f"[当前对话者档案：{prof3[:140]}]\n" + (req.prompt or "")
 
     @llm_tool(name="web_search")
     async def web_search(self, event: AstrMessageEvent, query: str):
@@ -1498,20 +1515,28 @@ class DcsWhosinPlugin(Star):
 
     def _roster_line(self) -> str:
         players = self._load_players()
+
+        def _name_of(qq, rec):
+            for raw in reversed(rec.get("names") or []):
+                name = str(raw or "").strip()
+                if not name or name.isdigit():
+                    continue
+                if len(name) > 24:
+                    name = name[:24]
+                return name
+            return str(qq)
+
         staff = []
         owner = []
         for qq, rec in players.items():
-            names = rec.get("names") or []
-            name = str(names[-1]) if names else qq
             if rec.get("is_owner"):
-                owner.append(name)
+                owner.append(_name_of(qq, rec))
             elif rec.get("site_role") == "STAFF":
-                staff.append(name)
+                staff.append(_name_of(qq, rec))
         ops_names = []
         for qq in _as_list(self.config.get("ops_admin_qqs")):
             rec = players.get(qq) or {}
-            names = rec.get("names") or []
-            ops_names.append(str(names[-1]) if names else qq)
+            ops_names.append(_name_of(qq, rec))
         parts = []
         if owner:
             parts.append("店主：" + "、".join(owner[:3]))
