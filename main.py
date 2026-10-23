@@ -798,6 +798,13 @@ class DcsWhosinPlugin(Star):
                     if not self._player_inject_logged:
                         self._player_inject_logged = True
                         logger.info(f"[dcs_whosin] 玩家档案已注入（示例：qq={sender}）")
+        if req.prompt and not str(req.prompt).startswith("[说话者："):
+            tag_name = re.sub(r"[\u200b-\u200f\u2060\ufeff]", "", sender_name).strip()
+            if not tag_name:
+                rec2 = self._load_players().get(sender) if sender else None
+                names = (rec2 or {}).get("names") or []
+                tag_name = str(names[-1]) if names else "未知"
+            req.prompt = f"[说话者：{tag_name[:30]}（QQ:{sender or '未知'}）] {req.prompt}"
 
     @llm_tool(name="web_search")
     async def web_search(self, event: AstrMessageEvent, query: str):
