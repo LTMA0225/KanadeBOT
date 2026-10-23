@@ -847,19 +847,34 @@ class DcsWhosinPlugin(Star):
                 if not self._ltm_injected_once:
                     self._ltm_injected_once = True
                     logger.info(f"[dcs_whosin] 长期记忆已注入（{len(memory)} 条）")
-        if self.config.get("player_db_inject", True) and "群友档案（参考" not in (req.system_prompt or ""):
+        if self.config.get("player_db_inject", True) and "当前对话者的档案" not in (req.system_prompt or ""):
             players = self._load_players()
             rec = players.get(sender) if sender else None
             if isinstance(rec, dict):
                 profile = str(rec.get("profile") or "").strip()
                 if profile:
+                    notes = rec.get("notes") if isinstance(rec.get("notes"), list) else []
+                    extra = ("；备注：" + "；".join(str(n) for n in notes[:3])) if notes else ""
                     req.system_prompt += (
                         "\n<system_reminder>当前对话者的档案（仅用于确认 ta 是谁，不要主动复述；"
-                        f"回答「我是谁」时只报群名片，绝不要用其他群友的信息）：{profile[:180]}</system_reminder>"
+                        f"回答「我是谁」时只报群名片，绝不要用其他群友的信息）：{profile[:180]}{extra[:160]}</system_reminder>"
                     )
                     if not self._player_inject_logged:
                         self._player_inject_logged = True
                         logger.info(f"[dcs_whosin] 玩家档案已注入（示例：qq={sender}）")
+        if "店内人员名单" not in (req.system_prompt or ""):
+            roster = self._roster_line()
+            if roster:
+                req.system_prompt += (
+                    f"\n<system_reminder>店内人员名单：{roster}（供识别身份；不要主动报出QQ）。</system_reminder>"
+                )
+        if self.config.get("ltm_enable", True) and "补充群知识" not in (req.system_prompt or ""):
+            manual = self._load_manual_memory()
+            if manual:
+                body = "\n".join(f"- {m}" for m in manual)[-1500:]
+                req.system_prompt += (
+                    "\n<system_reminder>补充群知识（管理者录入，优先参考）：\n" + body + "\n</system_reminder>"
+                )
         if req.prompt and not str(req.prompt).startswith("[说话者："):
             tag_name = re.sub(r"[\u200b-\u200f\u2060\ufeff]", "", sender_name).strip()
             if not tag_name:
@@ -1030,6 +1045,38 @@ class DcsWhosinPlugin(Star):
             return "查询关键词为空。"
         players = self._load_players()
         kw = keyword.lower()
+        role_map = {
+            "staff": "STAFF",
+            "店员": "STAFF",
+            "员工": "STAFF",
+            "staffs": "STAFF",
+            "admin": "ADMIN",
+            "管理员": "ADMIN",
+            "owner": "OWNER",
+            "店主": "OWNER",
+            "店长": "OWNER",
+            "群主": "OWNER",
+            "sponsor": "CUSTOMER(SPONSOR)",
+            "赞助": "CUSTOMER(SPONSOR)",
+        }
+        if kw in role_map:
+            role = role_map[kw]
+            hits = []
+            for qq, rec in players.items():
+                if role == "OWNER":
+                    if rec.get("is_owner"):
+                        hits.append((qq, rec))
+                elif rec.get("site_role") == role:
+                    hits.append((qq, rec))
+            if not hits:
+                return f"没有找到身份为「{keyword}」的群友。"
+            hits.sort(key=lambda kv: -int(kv[1].get("count") or 0))
+            lines = [
+                "· " + "/".join(str(n) for n in (r.get("names") or [])[:2])
+                + ("（店主）" if r.get("is_owner") else "")
+                for qq, r in hits[:15]
+            ]
+            return f"身份为「{keyword}」的群友：\n" + "\n".join(lines)
         hits = [
             (qq, r)
             for qq, r in players.items()
@@ -1042,14 +1089,83 @@ class DcsWhosinPlugin(Star):
         for qq, r in hits[:3]:
             names = "、".join(str(n) for n in (r.get("names") or [])[:3])
             tags = "、".join(str(t) for t in (r.get("tags") or []))
+            notes = r.get("notes") if isinstance(r.get("notes"), list) else []
+            note_line = ("\n  备注：" + "；".join(str(n) for n in notes[:3])) if notes else ""
             lines.append(
                 f"- {names}（QQ {qq}）发言 {r.get('count', 0)} 条\n"
                 f"  {str(r.get('profile') or '').strip()}\n"
                 f"  标签：{tags}\n"
                 f"  身份：{r.get('site_role') or '未绑定站点'}"
                 + ("｜店主/群主" if r.get("is_owner") else "")
+                + note_line
             )
         return "群友档案：\n" + "\n".join(lines) + "\n（供参考，不要在回复里主动报出对方QQ）"
+
+    @llm_tool(name="remember")
+    async def remember(self, event: AstrMessageEvent, content: str, scope: str = "group", player: str = ""):
+        '''记住一条信息（群通用知识或某个群友的个人资料）。
+
+        scope=group 记入全群长期知识（仅店主/管理员可用）；scope=player 记入个人档案（默认当前说话者，管理员可指定他人）。
+        当用户明确要求"记住…"时使用；不确定是否长期有价值时不要记。
+
+        Args:
+            content(string): 要记住的内容，一句话，不超过 80 字
+            scope(string): group=群通用知识；player=个人资料
+            player(string): scope=player 时的对象（群名片或 QQ），留空=当前说话者
+        '''
+        content = re.sub(r"\s+", " ", str(content or "")).strip()[:100]
+        if not content:
+            return "要记住的内容为空。"
+        owner_qq = str(self.config.get("main_admin_qq", "") or "").strip()
+        ops = _as_list(self.config.get("ops_admin_qqs", []))
+        sender = str(event.get_sender_id() or "").strip()
+        is_admin = bool(sender) and (sender == owner_qq or sender in ops)
+        scope = str(scope or "group").strip().lower()
+        if scope in ("group", "群", "群通用", "知识"):
+            if not is_admin:
+                return "只有店主或管理员可以记录群知识。"
+            mem = self._load_manual_memory()
+            if content not in mem:
+                mem.append(content)
+            mem = mem[-100:]
+            self._save_manual_memory(mem)
+            logger.info(f"[dcs_whosin] 群知识已记录：{content[:40]}")
+            return "已记入群知识库。"
+        players = self._load_players()
+        target = str(player or "").strip()
+        target_qq = ""
+        if not target:
+            target_qq = sender
+        elif target.isdigit():
+            target_qq = target
+        else:
+            kw = target.lower()
+            cand = [
+                (qq, r)
+                for qq, r in players.items()
+                if kw in (" ".join(str(n) for n in (r.get("names") or [])) + " " + qq).lower()
+            ]
+            if cand:
+                cand.sort(key=lambda kv: -int(kv[1].get("count") or 0))
+                target_qq = cand[0][0]
+        if not target_qq:
+            return "没找到要记录的群友。"
+        if target_qq != sender and not is_admin:
+            return "只能记录自己的资料，或请管理员帮忙记录。"
+        rec = players.get(target_qq)
+        if not isinstance(rec, dict):
+            rec = {"names": [], "count": 0, "active_hours": [], "profile": "", "tags": [], "updated": ""}
+            players[target_qq] = rec
+        notes = rec.get("notes") if isinstance(rec.get("notes"), list) else []
+        if content not in notes:
+            notes.append(content)
+        rec["notes"] = notes[-5:]
+        rec["updated"] = time.strftime("%Y-%m-%d %H:%M")
+        self._players = players
+        self._players_dirty = True
+        self._save_players()
+        logger.info(f"[dcs_whosin] 玩家备注已记录：{target_qq} {content[:40]}")
+        return "已记到个人档案。"
 
     def _search_key(self) -> str:
         provider = self.context.get_provider_by_id("deepseek")
@@ -1352,6 +1468,58 @@ class DcsWhosinPlugin(Star):
             temp.replace(path)
         except Exception as exc:
             logger.warning(f"[dcs_whosin] 包场记录保存失败：{exc!r}")
+
+    def _manual_memory_file(self) -> Path:
+        return self.plugin_data_dir / "manual_memory.txt"
+
+    def _load_manual_memory(self) -> list[str]:
+        try:
+            path = self._manual_memory_file()
+            if path.exists():
+                out = []
+                for ln in path.read_text(encoding="utf-8").splitlines():
+                    ln = ln.strip()
+                    if ln:
+                        out.append(ln[2:].strip() if ln.startswith("- ") else ln)
+                return out
+        except Exception:
+            pass
+        return []
+
+    def _save_manual_memory(self, lines: list[str]) -> None:
+        try:
+            self.plugin_data_dir.mkdir(parents=True, exist_ok=True)
+            path = self._manual_memory_file()
+            temp = path.with_suffix(".tmp")
+            temp.write_text("\n".join(f"- {ln}" for ln in lines) + "\n", encoding="utf-8")
+            temp.replace(path)
+        except Exception as exc:
+            logger.warning(f"[dcs_whosin] 群知识保存失败：{exc!r}")
+
+    def _roster_line(self) -> str:
+        players = self._load_players()
+        staff = []
+        owner = []
+        for qq, rec in players.items():
+            names = rec.get("names") or []
+            name = str(names[-1]) if names else qq
+            if rec.get("is_owner"):
+                owner.append(name)
+            elif rec.get("site_role") == "STAFF":
+                staff.append(name)
+        ops_names = []
+        for qq in _as_list(self.config.get("ops_admin_qqs")):
+            rec = players.get(qq) or {}
+            names = rec.get("names") or []
+            ops_names.append(str(names[-1]) if names else qq)
+        parts = []
+        if owner:
+            parts.append("店主：" + "、".join(owner[:3]))
+        if staff:
+            parts.append("STAFF：" + "、".join(staff[:8]))
+        if ops_names:
+            parts.append("管理员/维护者：" + "、".join(ops_names[:3]))
+        return "；".join(parts)
 
     def _players_file(self) -> Path:
         return self.plugin_data_dir / "players.json"
