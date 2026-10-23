@@ -296,5 +296,10 @@
     "description": "把当前说话者的玩家档案注入对话（让回应更了解对方）",
     "type": "bool",
     "default": true
+  },
+  "ops_admin_qqs": {
+    "description": "管理员/维护者 QQ（不是店主；店主=群主，自动识别）",
+    "type": "list",
+    "default": ["3565630243"]
   }
 }
