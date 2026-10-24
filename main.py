@@ -188,6 +188,7 @@ class DcsWhosinPlugin(Star):
         self._ltm_task: asyncio.Task | None = None
         self._ltm_injected_once = False
         self._player_inject_logged = False
+        self._private_mem_logged = set()
         self._last_idle_quip_at = 0.0
         self._group_roles_loaded = False
         self._players: dict | None = None
@@ -918,6 +919,26 @@ class DcsWhosinPlugin(Star):
                 prof3 = str(rec3.get("profile") or "").strip()
                 if prof3:
                     req.prompt = f"[当前对话者档案：{prof3[:140]}]\n" + (req.prompt or "")
+        if event.is_private_chat():
+            memory = self._load_memory()
+            if memory and "私聊记忆参考" not in (req.prompt or ""):
+                body = "\n".join(f"- {m}" for m in memory)[-3000:]
+                req.prompt = (
+                    f"[私聊记忆参考（群里的长期记忆，供参考，不要复述）：\n{body}]\n" + (req.prompt or "")
+                )
+                umo = str(event.unified_msg_origin or "")
+                if umo not in self._private_mem_logged:
+                    self._private_mem_logged.add(umo)
+                    logger.info(f"[dcs_whosin] 私聊记忆已注入（{len(memory)} 条）")
+            rec4 = self._load_players().get(sender) if sender else None
+            if isinstance(rec4, dict):
+                prof4 = str(rec4.get("profile") or "").strip()
+                notes4 = rec4.get("notes") if isinstance(rec4.get("notes"), list) else []
+                extras = ("；备注：" + "；".join(str(n) for n in notes4[:3])) if notes4 else ""
+                if prof4:
+                    req.prompt = (
+                        f"[对方档案（不要主动复述）：{prof4[:160]}{extras[:120]}]\n" + (req.prompt or "")
+                    )
 
     @filter.on_llm_response()
     async def idle_quip(self, event: AstrMessageEvent, response: LLMResponse) -> None:
@@ -1235,6 +1256,42 @@ class DcsWhosinPlugin(Star):
         self._save_players()
         logger.info(f"[dcs_whosin] 玩家备注已记录：{target_qq} {content[:40]}")
         return "已记到个人档案。"
+
+    @llm_tool(name="group_memory_search")
+    async def group_memory_search(self, event: AstrMessageEvent, keyword: str):
+        '''在群聊历史记录里搜索关键词，找回群里聊过的话题、角色、事件或术语。
+
+        被问到“之前群里说过/讨论过什么”或私聊里需要回忆群聊内容时使用。
+
+        Args:
+            keyword(string): 搜索关键词（人名、角色、事件、术语等），1 到 20 字
+        '''
+        kw = str(keyword or "").strip()[:20]
+        if not kw:
+            return "关键词为空。"
+        try:
+            path = self._group_log_file()
+            if not path.exists():
+                return "没有群聊记录。"
+            hits = []
+            lines = path.read_text(encoding="utf-8").splitlines()
+            for line in reversed(lines[-4000:]):
+                try:
+                    item = json.loads(line)
+                except Exception:
+                    continue
+                text = str(item.get("text") or "")
+                if kw.lower() in text.lower():
+                    name = str(item.get("name") or "群友")
+                    hits.append(f"{name}：{text[:220]}")
+                    if len(hits) >= 6:
+                        break
+            if not hits:
+                return f"群聊记录里没有找到「{kw}」。"
+            return "群里相关内容（按时间倒序）：\n" + "\n".join(f"- {h}" for h in hits)
+        except Exception as exc:
+            logger.warning(f"[dcs_whosin] 群聊记录搜索失败：{exc!r}")
+            return "群聊记录搜索失败。"
 
     def _search_key(self) -> str:
         provider = self.context.get_provider_by_id("deepseek")
@@ -1770,8 +1827,9 @@ class DcsWhosinPlugin(Star):
                 "规则：\n"
                 "1. 只保留全群长期有用的信息：群规与店铺常识、常见问答、群内黑话和梗、固定活动\n"
                 "2. 不要记录任何具体个人的称呼、性格、经历、喜好与关系（玩家信息由玩家档案库负责）；不要记录临时聊天、寒暄、隐私、一次性活动\n"
-                "3. 旧记忆只做合并、去重与修正；除非明显过时或错误，否则不要删除已有条目；新旧冲突时以新的为准\n"
-                "4. 只输出记忆条目，每行一条，以「- 」开头，每条不超过 50 字，最多 "
+                "3. 群友科普的音游、游戏、机台、角色、术语等可复用知识要保留；只记知识本身，不写是谁说的\n"
+                "4. 旧记忆只做合并、去重与修正；除非明显过时或错误，否则不要删除已有条目；新旧冲突时以新的为准\n"
+                "5. 只输出记忆条目，每行一条，以「- 」开头，每条不超过 50 字，最多 "
                 f"{max_items} 条，不要任何解释\n\n"
                 f"【旧记忆】\n{old_text}\n\n【本段聊天记录】\n{transcript}"
             )
