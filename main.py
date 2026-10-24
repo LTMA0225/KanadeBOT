@@ -188,6 +188,7 @@ class DcsWhosinPlugin(Star):
         self._ltm_task: asyncio.Task | None = None
         self._ltm_injected_once = False
         self._player_inject_logged = False
+        self._last_idle_quip_at = 0.0
         self._group_roles_loaded = False
         self._players: dict | None = None
         self._players_saved_at = 0.0
@@ -928,10 +929,27 @@ class DcsWhosinPlugin(Star):
             return
         if not text or not _is_idle_only(text):
             return
+        try:
+            rate = int(self.config.get("idle_quip_rate", 20) or 0)
+        except (TypeError, ValueError):
+            rate = 20
+        try:
+            cooldown = int(self.config.get("idle_quip_cooldown_s", 600) or 0)
+        except (TypeError, ValueError):
+            cooldown = 600
+        now = time.time()
+        last = float(getattr(self, "_last_idle_quip_at", 0.0) or 0.0)
+        if now - last < max(0, cooldown) or random.randint(1, 100) > max(0, min(100, rate)):
+            response.result_chain = None
+            response._completion_text = ""
+            response.reasoning_content = None
+            logger.info("[dcs_whosin] 待机语录已跳过（静默）")
+            return
         lines = [str(x).strip() for x in _as_list(self.config.get("idle_quip_lines", [])) if str(x).strip()]
         if not lines:
             lines = list(IDLE_QUIPS)
         response.completion_text = random.choice(lines)
+        self._last_idle_quip_at = now
         logger.info(f"[dcs_whosin] 待机语录已替换空回复：{response.completion_text}")
 
     @llm_tool(name="web_search")

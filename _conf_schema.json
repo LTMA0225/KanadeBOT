@@ -243,7 +243,7 @@
     "default": 1500
   },
   "idle_quip_enable": {
-    "description": "小奏只想发“……”时，换成一句待机语录",
+    "description": "小奏只想发“……”时，偶尔换成一句待机语录（其余情况静默不发）",
     "type": "bool",
     "default": true
   },
@@ -251,6 +251,16 @@
     "description": "自定义待机语录（留空使用内置语录池）",
     "type": "list",
     "default": []
+  },
+  "idle_quip_rate": {
+    "description": "待机语录发送概率（%），其余情况静默不发送",
+    "type": "int",
+    "default": 20
+  },
+  "idle_quip_cooldown_s": {
+    "description": "两条待机语录之间的最短间隔（秒）",
+    "type": "int",
+    "default": 600
   },
   "bz_admins": {
     "description": "可使用 /bz 增点的额外 QQ（本群群主自动可用）",
