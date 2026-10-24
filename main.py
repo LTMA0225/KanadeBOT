@@ -20,6 +20,7 @@ from astrbot.api import AstrBotConfig, llm_tool, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image, Plain
 from astrbot.api.platform import MessageType
+from astrbot.api.provider import LLMResponse
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.message.message_event_result import MessageChain
 
@@ -123,6 +124,23 @@ QUERY_QUIPS = (
     "好，我看看哦…",
     "嗯…稍等，我确认一下。",
 )
+
+IDLE_QUIPS = (
+    "…正在思考如何救赎mfy她妈",
+    "…在给机台想新名字",
+    "…正在思考下一首打什么",
+    "…盯着谱面发呆中",
+    "…在算今天的币还够打几局",
+    "…正在思考怎么把maimai搬回宿舍",
+)
+
+
+def _is_idle_only(text: str) -> bool:
+    raw = str(text or "").strip()
+    if not raw or len(raw) > 16:
+        return False
+    core = re.sub(r"[\s.。…·~～!！?？,，、;；:：\-—_=+*^&%$#@|/\\()（）\[\]【】{}<>\"'“”‘’`]", "", raw)
+    return not core
 
 def _as_list(value) -> list[str]:
     if value is None:
@@ -899,6 +917,22 @@ class DcsWhosinPlugin(Star):
                 prof3 = str(rec3.get("profile") or "").strip()
                 if prof3:
                     req.prompt = f"[当前对话者档案：{prof3[:140]}]\n" + (req.prompt or "")
+
+    @filter.on_llm_response()
+    async def idle_quip(self, event: AstrMessageEvent, response: LLMResponse) -> None:
+        if not self.config.get("idle_quip_enable", True):
+            return
+        try:
+            text = str(response.completion_text or "").strip()
+        except Exception:
+            return
+        if not text or not _is_idle_only(text):
+            return
+        lines = [str(x).strip() for x in _as_list(self.config.get("idle_quip_lines", [])) if str(x).strip()]
+        if not lines:
+            lines = list(IDLE_QUIPS)
+        response.completion_text = random.choice(lines)
+        logger.info(f"[dcs_whosin] 待机语录已替换空回复：{response.completion_text}")
 
     @llm_tool(name="web_search")
     async def web_search(self, event: AstrMessageEvent, query: str):

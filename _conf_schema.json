@@ -242,6 +242,16 @@
     "type": "int",
     "default": 1500
   },
+  "idle_quip_enable": {
+    "description": "小奏只想发“……”时，换成一句待机语录",
+    "type": "bool",
+    "default": true
+  },
+  "idle_quip_lines": {
+    "description": "自定义待机语录（留空使用内置语录池）",
+    "type": "list",
+    "default": []
+  },
   "bz_admins": {
     "description": "可使用 /bz 增点的额外 QQ（本群群主自动可用）",
     "type": "list",
