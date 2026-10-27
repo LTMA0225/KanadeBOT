@@ -142,6 +142,14 @@ def _is_idle_only(text: str) -> bool:
     core = re.sub(r"[\s.。…·~～!！?？,，、;；:：\-—_=+*^&%$#@|/\\()（）\[\]【】{}<>\"'“”‘’`]", "", raw)
     return not core
 
+
+def _parse_hhmm(text: str, default: tuple[int, int]) -> tuple[int, int]:
+    try:
+        parts = str(text or "").strip().split(":")
+        return int(parts[0]) % 24, int(parts[1]) % 60
+    except Exception:
+        return default
+
 def _as_list(value) -> list[str]:
     if value is None:
         return []
@@ -197,6 +205,8 @@ class DcsWhosinPlugin(Star):
         self._pricing: dict | None = None
         self._pricing_at = 0.0
         self._pricing_default_logged = False
+        self._aquiz_task: asyncio.Task | None = None
+        self._aquiz_pending: dict | None = None
 
     @staticmethod
     def _resolve_cache_dir() -> Path:
@@ -230,6 +240,10 @@ class DcsWhosinPlugin(Star):
         if self.config.get("mj_enable", True):
             if self._mj_task is None or self._mj_task.done():
                 self._mj_task = asyncio.create_task(self._mj_prefetch())
+        if self.config.get("aquiz_enable", False):
+            if self._aquiz_task is None or self._aquiz_task.done():
+                self._aquiz_task = asyncio.create_task(self._aquiz_loop())
+                logger.info("[dcs_whosin] 谱面问答任务已启动。")
         if self._status_task and not self._status_task.done():
             return
         self._status_task = asyncio.create_task(self._status_loop())
@@ -671,6 +685,13 @@ class DcsWhosinPlugin(Star):
             if event.get_message_type() != MessageType.GROUP_MESSAGE:
                 return
             group_id = str(event.get_group_id() or "").strip()
+            if group_id and group_id == self._aquiz_target_group():
+                self._aquiz_capture(event)
+                try:
+                    self._append_aquiz_debug(event)
+                except Exception:
+                    pass
+                return
             groups = _as_list(self.config.get("allowed_groups"))
             if groups and group_id not in groups:
                 return
@@ -1292,6 +1313,359 @@ class DcsWhosinPlugin(Star):
         except Exception as exc:
             logger.warning(f"[dcs_whosin] 群聊记录搜索失败：{exc!r}")
             return "群聊记录搜索失败。"
+
+    def _aquiz_target_group(self) -> str:
+        return str(self.config.get("aquiz_group", "1129978061") or "").strip()
+
+    def _aquiz_state_file(self) -> Path:
+        return self.plugin_data_dir / "aquiz_state.json"
+
+    def _aquiz_results_file(self) -> Path:
+        return self.plugin_data_dir / "aquiz_results.jsonl"
+
+    def _load_aquiz_state(self) -> dict:
+        try:
+            path = self._aquiz_state_file()
+            if path.exists():
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            pass
+        return {"done": False, "sent": 0, "titles": [], "aquadx_qq": "", "started": "", "updated": "", "error": ""}
+
+    def _save_aquiz_state(self, state: dict) -> None:
+        try:
+            self.plugin_data_dir.mkdir(parents=True, exist_ok=True)
+            path = self._aquiz_state_file()
+            temp = path.with_suffix(".tmp")
+            temp.write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
+            temp.replace(path)
+        except Exception as exc:
+            logger.warning(f"[dcs_whosin] 谱面问答状态保存失败：{exc!r}")
+
+    def _aquiz_bot(self):
+        try:
+            for inst in self.context.platform_manager.get_insts():
+                bot = getattr(inst, "bot", None)
+                if bot is not None and hasattr(bot, "send_group_msg"):
+                    return bot
+        except Exception:
+            pass
+        return None
+
+    def _aquiz_in_window(self) -> bool:
+        sh, sm = _parse_hhmm(self.config.get("aquiz_start", "23:10"), (23, 10))
+        eh, em = _parse_hhmm(self.config.get("aquiz_end", "06:30"), (6, 30))
+        now = datetime.now()
+        cur = now.hour * 60 + now.minute
+        start = sh * 60 + sm
+        end = eh * 60 + em
+        if start <= end:
+            return start <= cur < end
+        return cur >= start or cur < end
+
+    def _aquiz_capture(self, event: AstrMessageEvent) -> None:
+        pending = self._aquiz_pending
+        if not isinstance(pending, dict):
+            return
+        try:
+            sender = str(event.get_sender_id() or "")
+            name = str(event.get_sender_name() or "")
+            text = str(event.get_message_str() or "").strip()
+        except Exception:
+            return
+        if not text:
+            try:
+                if any(isinstance(c, Image) for c in event.get_messages()):
+                    text = "[图片]"
+                else:
+                    return
+            except Exception:
+                return
+        target_qq = str(pending.get("aquadx_qq") or "")
+        label = name.lower()
+        is_aquadx = bool(target_qq and sender == target_qq) or ("aquadx" in label) or ("aqua" in label and "dx" in label)
+        all_items = pending.get("all")
+        if not isinstance(all_items, list):
+            all_items = []
+            pending["all"] = all_items
+        if len(all_items) < 50:
+            all_items.append({"ts": time.time(), "sender": sender, "name": name, "text": text[:400]})
+        is_reply_to_bot = False
+        try:
+            self_id = str(event.get_self_id() or "")
+            for comp in event.get_messages():
+                if comp.__class__.__name__ == "At" and str(getattr(comp, "qq", "")) == self_id:
+                    is_reply_to_bot = True
+                    break
+        except Exception:
+            pass
+        looks_chart = any(
+            k in text.lower()
+            for k in ("定数", "难度", "等级", "master", "expert", "remaster", "advanced", "basic", "bpm", "紫", "红", "黄", "绿", "白", "dx", "std", "曲", "歌", "+")
+        )
+        bucket = "replies" if is_aquadx else ("replies_guess" if (is_reply_to_bot or looks_chart) else "")
+        if bucket:
+            items = pending.get(bucket)
+            if not isinstance(items, list):
+                items = []
+                pending[bucket] = items
+            items.append({"ts": time.time(), "sender": sender, "name": name, "text": text[:1000]})
+
+    def _append_aquiz_debug(self, event: AstrMessageEvent) -> None:
+        try:
+            text = str(event.get_message_str() or "").strip()
+            if not text:
+                return
+            rec = {
+                "ts": time.time(),
+                "sender": str(event.get_sender_id() or ""),
+                "name": str(event.get_sender_name() or ""),
+                "text": text[:300],
+            }
+            path = self.plugin_data_dir / "aquiz_debug.jsonl"
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+    async def _aquiz_fetch_titles(self) -> list[dict]:
+        import aiohttp
+
+        url = "https://www.diving-fish.com/api/maimaidxprober/music_data"
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25)) as sess:
+            async with sess.get(url, headers={"User-Agent": "Mozilla/5.0"}) as resp:
+                data = await resp.json()
+        out = []
+        seen = set()
+        for item in data if isinstance(data, list) else []:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "").strip()
+            if not title or title in seen or len(title) > 40:
+                continue
+            if re.search(r"[\r\n\[\]{}<>]", title):
+                continue
+            seen.add(title)
+            levels = item.get("level") or []
+            dss = item.get("ds") or []
+            out.append(
+                {
+                    "title": title,
+                    "type": str(item.get("type") or ""),
+                    "level": str(levels[-1]) if levels else "",
+                    "ds": dss[-1] if dss else None,
+                }
+            )
+        random.shuffle(out)
+        return out
+
+    async def _aquiz_find_aquadx(self, bot, group: int) -> str:
+        try:
+            members = await bot.call_action("get_group_member_list", group_id=group)
+        except Exception as exc:
+            logger.warning(f"[dcs_whosin] 谱面问答：获取群成员失败 {exc!r}")
+            return ""
+        try:
+            dump = []
+            for m in members if isinstance(members, list) else []:
+                if not isinstance(m, dict):
+                    continue
+                dump.append(
+                    {
+                        "user_id": str(m.get("user_id") or ""),
+                        "nickname": str(m.get("nickname") or ""),
+                        "card": str(m.get("card") or ""),
+                        "role": str(m.get("role") or ""),
+                        "is_robot": m.get("is_robot"),
+                    }
+                )
+            (self.plugin_data_dir / "aquiz_members.json").write_text(
+                json.dumps(dump, ensure_ascii=False, indent=1), encoding="utf-8"
+            )
+        except Exception:
+            pass
+        for m in members if isinstance(members, list) else []:
+            if not isinstance(m, dict):
+                continue
+            label = (str(m.get("card") or "") + " " + str(m.get("nickname") or "")).lower()
+            if "aquadx" in label or ("aqua" in label and "dx" in label):
+                return str(m.get("user_id") or "").strip()
+        return ""
+
+    async def _aquiz_write_report(self) -> None:
+        path = self._aquiz_results_file()
+        if not path.exists():
+            return
+        records = []
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except Exception:
+                    continue
+        except Exception:
+            return
+        lines = ["# aquadx 谱面问答记录", ""]
+        ok = 0
+        for i, r in enumerate(records, 1):
+            replies = r.get("replies") or []
+            if replies:
+                ok += 1
+            lines.append(f"## {i}. {r.get('title')}（{r.get('type') or '?'}）")
+            ds = r.get("ds")
+            lines.append(f"- 水鱼参考：{r.get('level') or '?'} / 定数 {ds if ds is not None else '?'}")
+            if replies:
+                for rep in replies[:2]:
+                    lines.append(f"- aquadx：{str(rep.get('text') or '')[:600]}")
+            else:
+                lines.append("- aquadx：无回复（超时）")
+            lines.append("")
+        lines.append(f"共 {len(records)} 首，{ok} 首收到回复。")
+        try:
+            (self.plugin_data_dir / "aquiz_report.md").write_text("\n".join(lines), encoding="utf-8")
+        except Exception:
+            pass
+
+    async def _aquiz_loop(self) -> None:
+        state = self._load_aquiz_state()
+        if state.get("done"):
+            logger.info("[dcs_whosin] 谱面问答任务已完成，跳过")
+            return
+        group = self._aquiz_target_group()
+        if not group.isdigit():
+            logger.warning("[dcs_whosin] 谱面问答：目标群号无效")
+            return
+        bot = None
+        for _ in range(60):
+            bot = self._aquiz_bot()
+            if bot is not None:
+                break
+            await asyncio.sleep(10)
+        if bot is None:
+            logger.warning("[dcs_whosin] 谱面问答：未找到 OneBot 客户端")
+            return
+        try:
+            groups = await bot.call_action("get_group_list")
+            group_ids = {str((g or {}).get("group_id")) for g in (groups or []) if isinstance(g, dict)}
+            if group not in group_ids:
+                logger.warning(f"[dcs_whosin] 谱面问答：机器人不在目标群 {group}，任务中止")
+                state["done"] = True
+                state["error"] = "not_in_group"
+                state["updated"] = time.strftime("%Y-%m-%d %H:%M")
+                self._save_aquiz_state(state)
+                return
+            logger.info(f"[dcs_whosin] 谱面问答：目标群 {group} 已在列表")
+        except Exception as exc:
+            logger.warning(f"[dcs_whosin] 谱面问答：获取群列表失败 {exc!r}")
+        aquadx = await self._aquiz_find_aquadx(bot, int(group))
+        state["aquadx_qq"] = aquadx or state.get("aquadx_qq", "")
+        state["updated"] = time.strftime("%Y-%m-%d %H:%M")
+        self._save_aquiz_state(state)
+        logger.info(f"[dcs_whosin] 谱面问答：aquadx QQ={aquadx or '未识别'}")
+        while not self._aquiz_in_window():
+            await asyncio.sleep(30)
+        titles = await self._aquiz_fetch_titles()
+        if not titles:
+            logger.warning("[dcs_whosin] 谱面问答：未获取到曲目")
+            return
+        try:
+            interval = max(60, int(self.config.get("aquiz_interval_s", 90) or 90))
+        except (TypeError, ValueError):
+            interval = 90
+        try:
+            wait_s = max(15, int(self.config.get("aquiz_reply_wait_s", 40) or 40))
+        except (TypeError, ValueError):
+            wait_s = 40
+        try:
+            maxq = max(1, int(self.config.get("aquiz_max", 30) or 30))
+        except (TypeError, ValueError):
+            maxq = 30
+        done_titles = set(state.get("titles") or [])
+        sent = int(state.get("sent") or 0)
+        state["started"] = state.get("started") or time.strftime("%Y-%m-%d %H:%M")
+        self._save_aquiz_state(state)
+        logger.info(f"[dcs_whosin] 谱面问答开始：{group} aquadx={aquadx or '未识别'} 上限={maxq} 间隔={interval}s")
+        consecutive_empty = 0
+        for item in titles:
+            if sent >= maxq or not self._aquiz_in_window():
+                break
+            title = item["title"]
+            if title in done_titles:
+                continue
+            send_time = time.time()
+            self._aquiz_pending = {"title": title, "aquadx_qq": aquadx, "replies": []}
+            query = f"{title}是什么歌？"
+            try:
+                await bot.send_group_msg(group_id=int(group), message=[{"type": "text", "data": {"text": query}}])
+            except Exception as exc:
+                logger.warning(f"[dcs_whosin] 谱面问答发送失败：{exc!r}")
+                self._aquiz_pending = None
+                state["done"] = True
+                state["error"] = "send_failed"
+                state["updated"] = time.strftime("%Y-%m-%d %H:%M")
+                self._save_aquiz_state(state)
+                break
+            logger.info(f"[dcs_whosin] 谱面问答已发送：{query[:60]}")
+            deadline = send_time + wait_s
+            while time.time() < deadline:
+                pending = self._aquiz_pending or {}
+                if pending.get("replies"):
+                    break
+                await asyncio.sleep(2)
+            replies = (self._aquiz_pending or {}).get("replies") or []
+            if not replies:
+                replies = (self._aquiz_pending or {}).get("replies_guess") or []
+            others = (self._aquiz_pending or {}).get("all") or []
+            others = [o for o in others if o not in replies][:8]
+            self._aquiz_pending = None
+            record = {
+                "ts": time.time(),
+                "title": title,
+                "type": item.get("type"),
+                "level": item.get("level"),
+                "ds": item.get("ds"),
+                "aquadx_qq": aquadx,
+                "replies": replies,
+                "others": others,
+            }
+            try:
+                with self._aquiz_results_file().open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            except Exception as exc:
+                logger.warning(f"[dcs_whosin] 谱面问答结果保存失败：{exc!r}")
+            done_titles.add(title)
+            sent += 1
+            state["sent"] = sent
+            state["titles"] = sorted(done_titles)
+            state["updated"] = time.strftime("%Y-%m-%d %H:%M")
+            self._save_aquiz_state(state)
+            await self._aquiz_write_report()
+            if not replies:
+                logger.info(f"[dcs_whosin] 谱面问答无回复：{title}")
+                consecutive_empty += 1
+                if consecutive_empty >= 1:
+                    logger.warning("[dcs_whosin] 谱面问答首条无回复，任务停止（检查 aquadx 是否在群/是否响应）")
+                    state["error"] = "no_response"
+                    state["done"] = True
+                    state["updated"] = time.strftime("%Y-%m-%d %H:%M")
+                    self._save_aquiz_state(state)
+                    break
+            else:
+                consecutive_empty = 0
+            elapsed = time.time() - send_time
+            if elapsed < interval:
+                await asyncio.sleep(interval - elapsed)
+        state["done"] = True
+        state["error"] = state.get("error", "")
+        state["updated"] = time.strftime("%Y-%m-%d %H:%M")
+        self._save_aquiz_state(state)
+        await self._aquiz_write_report()
+        logger.info(f"[dcs_whosin] 谱面问答任务完成：已发送 {sent} 条")
 
     def _search_key(self) -> str:
         provider = self.context.get_provider_by_id("deepseek")
@@ -2393,7 +2767,7 @@ class DcsWhosinPlugin(Star):
         }
 
     async def terminate(self):
-        for task in (self._status_task, self._deps_task, self._presence_task, self._mj_task, self._ltm_task):
+        for task in (self._status_task, self._deps_task, self._presence_task, self._mj_task, self._ltm_task, self._aquiz_task):
             if task and not task.done():
                 task.cancel()
         await self.renderer.close()

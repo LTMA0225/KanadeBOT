@@ -262,6 +262,41 @@
     "type": "int",
     "default": 600
   },
+  "aquiz_enable": {
+    "description": "夜间谱面问答任务：向指定群的 aquadx bot 询问曲目别名与谱面信息（只在目标群发送）",
+    "type": "bool",
+    "default": false
+  },
+  "aquiz_group": {
+    "description": "谱面问答目标群号",
+    "type": "string",
+    "default": "1129978061"
+  },
+  "aquiz_start": {
+    "description": "夜间任务开始时间（HH:MM）",
+    "type": "string",
+    "default": "23:10"
+  },
+  "aquiz_end": {
+    "description": "夜间任务结束时间（HH:MM）",
+    "type": "string",
+    "default": "06:30"
+  },
+  "aquiz_interval_s": {
+    "description": "两次提问之间的最小间隔（秒）",
+    "type": "int",
+    "default": 90
+  },
+  "aquiz_reply_wait_s": {
+    "description": "等待 aquadx 回复的秒数",
+    "type": "int",
+    "default": 40
+  },
+  "aquiz_max": {
+    "description": "本次任务最多提问数量",
+    "type": "int",
+    "default": 30
+  },
   "bz_admins": {
     "description": "可使用 /bz 增点的额外 QQ（本群群主自动可用）",
     "type": "list",
