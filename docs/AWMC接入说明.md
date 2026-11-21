@@ -22,6 +22,27 @@ awmc_bridge_secret = 与 AWMC_KANADE_BRIDGE_SECRET 相同
 
 确认 NapCat → AstrBot 的 aiocqhttp 反向 WS 正常；私聊使用 `/maiu` 时打开 `allow_private_chat` 或把 QQ 加入 `private_chat_whitelist`。
 
+## 现网 AWMC Bot 核对（2026-11-22）
+
+从现网 `milk-new:/www/bot/awmc/.env` 读取到的非敏感配置：
+
+```text
+AWMC_API_MODE=team
+AWMC_API_BASE_URL=http://ipv4-beta.kxcym.top:25800
+AWMCNET_SYNC_URL=http://net.wmc.pub:18780
+MAIMAIDX_GROUP_CONSOLE_ENABLED=true
+MAIMAIDX_GROUP_CONSOLE_PUBLIC_URL=https://group.wmc.pub/group-console
+MAIMAIDX_GROUP_CONSOLE_HOST=0.0.0.0
+MAIMAIDX_GROUP_CONSOLE_PORT=8100
+AWMC_XF_BRIDGE_ENABLED=true
+AWMC_XF_BRIDGE_SECRET=已设置（不要复用）
+AWMC_KANADE_BRIDGE_SECRET=当前为空（需新增）
+```
+
+- 当前生产 HEAD：`5010eef4`（Kanade Bridge 在 PR #186，尚未部署）。
+- 群后台本机 `http://127.0.0.1:8100/group-console/` 返回 200，`maimaidx-bot.service` active。
+- 因此 Kanade 的 `awmc_bridge_url` 填 `https://group.wmc.pub`，不要带 `/group-console`。
+
 ## 基础指令
 
 | 指令 | 作用 | 说明 |
@@ -50,6 +71,16 @@ awmc_bridge_secret = 与 AWMC_KANADE_BRIDGE_SECRET 相同
 - 首次绑定 `create_only`：不换绑、不跨 QQ 认领；一次性二维码不会在绑定后重复使用。
 - 二维码只进入任务执行协程，不写入任务状态、接口响应或日志。
 - 默认 AstrBot 唤醒前缀为 `/`；群聊需要 @ 机器人或唤醒词，私聊按 AstrBot 配置可能需要 `/`。
+
+## 配置步骤
+
+1. 先合入并部署 AWMC Bot 的 PR #186；确认 `maimaidx-bot.service` 重启后群后台仍可用。
+2. 在 AWMC 主机生成独立密钥：`openssl rand -hex 32`；写入 `.env` 的 `AWMC_KANADE_BRIDGE_SECRET`，**不要**复用 `AWMC_XF_BRIDGE_SECRET`。
+3. 同文件确认 `AWMC_KANADE_BRIDGE_AUTO_AGREE=true`；`AWMC_KANADE_BRIDGE_ALLOW_IPS` 可先留空，稳定后填入 KanadeBot 出口 IP。
+4. 重启 AWMC Bot，使群后台加载 Kanade 路由。
+5. 在 AstrBot 插件配置填 `awmc_bridge_url=https://group.wmc.pub`，`awmc_bridge_secret` 填第 2 步生成的同一密钥；确认 `b50_enable=true`。
+6. 在 AstrBot 插件页重载 Kanade 插件/安装 `Pillow`、`zxing-cpp` 依赖；NapCat 私聊需允许 `allow_private_chat` 或加入白名单。
+7. 测试顺序：`/qbind` → `/b50` → `/mai绑定`（或 `/maiu`）→ `/u`。
 
 ## 验证
 
