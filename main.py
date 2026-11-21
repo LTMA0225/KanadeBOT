@@ -7,8 +7,10 @@ import importlib.util
 import inspect
 import json
 import math
+import os
 import random
 import re
+from urllib.parse import quote
 import sys
 import tempfile
 import time
@@ -43,12 +45,19 @@ try:
         parse_booking,
         prune_bookings,
     )
+    from .dcs_b50 import (
+        B50Error,
+        _CoverLoader,
+        build_b50_payload,
+        format_b50_text,
+    )
     from .dcs_botapi import bot_action, parse_present_users, public_api_error
     from .dcs_api import (
         DEFAULT_FALLBACK_IPS,
         DEFAULT_TARGET_URLS,
         EMPTY_PLAYER_MESSAGE,
     )
+    from .dcs_maidx import query_dx_players
     from .dcs_mj import (
         download_sticker,
         find_cached_sticker,
@@ -65,6 +74,12 @@ try:
         visit_key,
     )
     from .dcs_render import WhosinRenderer
+    from .dcs_sitebooking import fetch_booking_html, parse_booking_page, pick_display
+    from .dcs_websearch import fetch_text as web_fetch_text
+    from .dcs_websearch import search_site as web_search_site
+    from .dcs_websearch import search_sources_exhausted as web_search_exhausted
+    from .dcs_websearch import search_web as web_search_plain
+    from . import dcs_vchart
 except ImportError:
     _plugin_dir = str(Path(__file__).resolve().parent)
     if _plugin_dir not in sys.path:
@@ -93,6 +108,7 @@ except ImportError:
         DEFAULT_TARGET_URLS,
         EMPTY_PLAYER_MESSAGE,
     )
+    from dcs_maidx import query_dx_players
     from dcs_mj import (
         download_sticker,
         find_cached_sticker,
@@ -109,6 +125,11 @@ except ImportError:
         visit_key,
     )
     from dcs_render import WhosinRenderer
+    from dcs_sitebooking import fetch_booking_html, parse_booking_page, pick_display
+    from dcs_websearch import fetch_text as web_fetch_text
+    from dcs_websearch import search_site as web_search_site
+    from dcs_websearch import search_sources_exhausted as web_search_exhausted
+    from dcs_websearch import search_web as web_search_plain
 
 PLUGIN_NAME = "astrbot_plugin_dcs_whosin"
 
@@ -187,6 +208,10 @@ class DcsWhosinPlugin(Star):
         self._seen_groups: set[str] = set()
         self._presence: dict[str, dict] = {}
         self._presence_ready = False
+        self._flap: dict[str, tuple[str, float]] = {}
+        self._presence_pending: dict[str, dict] = {}
+        self._site_bookings: list[dict] = []
+        self._site_bookings_at: float = 0.0
         self._presence_task: asyncio.Task | None = None
         self._records_state: dict | None = None
         self._mj_task: asyncio.Task | None = None
@@ -206,7 +231,15 @@ class DcsWhosinPlugin(Star):
         self._pricing_at = 0.0
         self._pricing_default_logged = False
         self._aquiz_task: asyncio.Task | None = None
+        self._aquiz_history_task: asyncio.Task | None = None
         self._aquiz_pending: dict | None = None
+        self._image_cleanup_task: asyncio.Task | None = None
+        self._bot_self_id = ""
+        self._b50_last_by_user: dict[str, float] = {}
+        self._b50_lock: asyncio.Lock | None = None
+        self._b50_next_at = 0.0
+        cover_dir = self.plugin_data_dir / "b50_covers"
+        self._b50_covers = _CoverLoader(str(cover_dir))
 
     @staticmethod
     def _resolve_cache_dir() -> Path:
@@ -244,6 +277,12 @@ class DcsWhosinPlugin(Star):
             if self._aquiz_task is None or self._aquiz_task.done():
                 self._aquiz_task = asyncio.create_task(self._aquiz_loop())
                 logger.info("[dcs_whosin] 谱面问答任务已启动。")
+            if self._aquiz_history_task is None or self._aquiz_history_task.done():
+                self._aquiz_history_task = asyncio.create_task(self._aquiz_history_once())
+        if self.config.get("image_cleanup_enable", True):
+            if self._image_cleanup_task is None or self._image_cleanup_task.done():
+                self._image_cleanup_task = asyncio.create_task(self._image_cleanup_loop())
+                logger.info("[dcs_whosin] 图片缓存清理任务已启动。")
         if self._status_task and not self._status_task.done():
             return
         self._status_task = asyncio.create_task(self._status_loop())
@@ -378,13 +417,14 @@ class DcsWhosinPlugin(Star):
             return
         await self._wait_group_slot(event)
 
+        notice_text = ""
         if self.config.get("booking_enable", True):
             active = active_bookings(self._bookings)
             if active:
                 prefix = str(self.config.get("presence_prefix", "【Kanade】") or "")
                 logger.info(f"[dcs_whosin] /j 命中包场提示（{len(active)} 条）")
-                yield event.plain_result(format_booking_notice(active, prefix))
-                return
+                # 不再直接中断：提示语附在结果前面，图片里也会画出包场时段。
+                notice_text = format_booking_notice(active, prefix)
 
         if self.config.get("query_quip_enable", True):
             quips = _as_list(self.config.get("query_quip_lines")) or list(QUERY_QUIPS)
@@ -410,10 +450,14 @@ class DcsWhosinPlugin(Star):
             staff_line.sort(key=lambda u: 0 if u.get("role") == "admin" else 1)
 
             if not players:
-                yield event.plain_result(EMPTY_PLAYER_MESSAGE)
+                yield event.plain_result(
+                    (notice_text + "\n" + EMPTY_PLAYER_MESSAGE) if notice_text else EMPTY_PLAYER_MESSAGE
+                )
                 return
 
             text_lines = [f"玩家：{','.join(u['name'] for u in players)}"]
+            if notice_text:
+                text_lines.insert(0, notice_text)
             if staff_line:
                 text_lines.append(f"管理/STAFF：{','.join(u['name'] for u in staff_line)}")
             text = "\n".join(text_lines)
@@ -508,6 +552,39 @@ class DcsWhosinPlugin(Star):
         if text:
             yield event.plain_result(text)
 
+    def _dx_allowed(self, event: AstrMessageEvent) -> bool:
+        try:
+            private = bool(event.is_private_chat())
+        except Exception:
+            return False
+        sender = str(event.get_sender_id() or "").strip()
+        if private:
+            return sender == "3565630243"
+        group = str(event.get_group_id() or "").strip()
+        return group == "1072977398"
+
+    @filter.regex(r"^/?dx玩家")
+    async def dx_players(self, event: AstrMessageEvent):
+        if not event.is_at_or_wake_command:
+            return
+        if not self._dx_allowed(event):
+            return
+        if not self.config.get("dx_enable", False):
+            yield event.plain_result("机台信息查询暂时停用了，等证书重签好再开。")
+            return
+        cert_path = str(self.config.get("maidx_cert", "") or "").strip()
+        if not cert_path:
+            yield event.plain_result("还没配置 maidx 证书，请在插件配置里把 maidx_cert 填成证书文件（.p12）的绝对路径后再试。")
+            return
+        password = str(self.config.get("maidx_cert_password", "") or "").strip()
+        cache_dir = str(getattr(self, "plugin_data_dir", "") or "")
+        try:
+            text = await query_dx_players(cert_path, password, cache_dir)
+        except Exception as exc:
+            logger.warning(f"[dcs_whosin] /dx玩家 查询失败：{exc!r}")
+            text = "查询机台信息失败，请稍后再试。"
+        yield event.plain_result(text)
+
     @filter.regex(r"(?i)^bd\s*\+?\s*(.*)$")
     async def bind_qq(self, event: AstrMessageEvent):
         if not event.is_at_or_wake_command:
@@ -557,6 +634,147 @@ class DcsWhosinPlugin(Star):
         yield event.plain_result(
             format_bind_reply(result if isinstance(result, dict) else {"ok": False, "error": "network"}, qq)
         )
+
+    @filter.command("b50")
+    async def best50(self, event: AstrMessageEvent):
+        if not self._policy_allows(event):
+            return
+        if not self.config.get("b50_enable", True):
+            yield event.plain_result("b50 查询暂时关掉了，等会儿再来吧。")
+            return
+
+        sender = str(event.get_sender_id() or "").strip()
+        cooldown = int(self.config.get("b50_cooldown_seconds", 15) or 0)
+        now = time.monotonic()
+        if cooldown > 0:
+            last = self._b50_last_by_user.get(sender, 0.0)
+            if now - last < cooldown:
+                remain = int(cooldown - (now - last)) + 1
+                yield event.plain_result(f"b50 每人 {cooldown} 秒一次哦，等 {remain} 秒再来吧。")
+                return
+        self._b50_last_by_user[sender] = now
+        if len(self._b50_last_by_user) > 800:
+            cutoff = now - 600
+            self._b50_last_by_user = {
+                k: v for k, v in self._b50_last_by_user.items() if v >= cutoff
+            }
+
+        target_qq = ""
+        target_name = ""
+        arg = self._b50_arg(event.get_message_str())
+        quoted = self._b50_quote_target(event)
+        if quoted and (not arg or self._b50_has_at(event)):
+            # @ 了人或引用了消息，就查那个人的
+            target_qq = quoted
+        elif not arg:
+            target_qq = sender if sender.isdigit() else ""
+        elif not self.config.get("b50_allow_others", True):
+            target_qq = sender if sender.isdigit() else ""
+        elif arg.isdigit() and len(arg) >= int(self.config.get("b50_qq_min_length", 5) or 5):
+            target_qq = arg
+        else:
+            target_name = arg
+
+        if not target_qq and not target_name:
+            yield event.plain_result("用法：/b50（查自己）、/b50 昵称、/b50 QQ号，或者 @ 一个人")
+            return
+
+        yield event.plain_result("稍等一下…正在拉成绩单。")
+
+        payload = None
+        error_text = ""
+        tries = [(target_name, target_qq)]
+        if target_name and target_qq:
+            tries.append(("", target_qq))
+        for username, qq in tries:
+            try:
+                payload = await build_b50_payload(
+                    username=username, qq=qq, loader=self._b50_covers
+                )
+                break
+            except B50Error as exc:
+                error_text = str(exc)
+            except Exception as exc:
+                logger.warning(f"[dcs_whosin] /b50 查询异常：{exc!r}")
+                error_text = "查询的时候出了点问题，等一下再试吧。"
+
+        if payload is None:
+            yield event.plain_result(error_text or "没查到成绩。")
+            return
+
+        text = format_b50_text(payload)
+        if not self.config.get("b50_enable_image", True):
+            yield event.plain_result(text)
+            return
+
+        path = await self._render_b50_image(payload)
+        if path:
+            yield event.chain_result([Plain(text), Image.fromFileSystem(path)])
+        else:
+            yield event.plain_result(text + "\n\n（图片渲染没成功，先看文字版吧）")
+
+    @staticmethod
+    def _b50_has_at(event: AstrMessageEvent) -> bool:
+        try:
+            return any(c.__class__.__name__ == "At" for c in event.get_messages())
+        except Exception:
+            return False
+
+    def _b50_quote_target(self, event: AstrMessageEvent) -> str:
+        """被 @ 或被引用的人的 QQ（排除自己）。"""
+        self_id = str(getattr(self, "_bot_self_id", "") or "")
+        ids: list[str] = []
+        try:
+            for comp in event.get_messages():
+                name = comp.__class__.__name__
+                if name == "At":
+                    qq = str(getattr(comp, "qq", "") or "")
+                    if qq:
+                        ids.append(qq)
+                elif name in ("Reply", "Quote"):
+                    for attr in ("sender_id", "qq", "user_id", "target_id"):
+                        qq = str(getattr(comp, attr, "") or "")
+                        if qq.isdigit() and len(qq) >= 5:
+                            ids.append(qq)
+                            break
+        except Exception:
+            pass
+        for qq in ids:
+            if qq != self_id:
+                return qq
+        return ""
+
+    @staticmethod
+    def _b50_arg(message: str) -> str:
+        raw = str(message or "").strip()
+        raw = re.sub(r"(?i)^/?b50\s*", "", raw)
+        raw = raw.lstrip("+").strip()
+        if raw.startswith("@") or raw.startswith("＠"):
+            raw = raw[1:].strip()
+        return raw[:40]
+
+    async def _render_b50_image(self, payload: dict) -> str | None:
+        """全局排队渲染，每张之间至少隔 interval 秒（默认 15）。"""
+        if self._b50_lock is None:
+            self._b50_lock = asyncio.Lock()
+        interval = float(self.config.get("b50_render_interval_seconds", 15) or 0)
+        async with self._b50_lock:
+            now = time.monotonic()
+            if interval > 0 and self._b50_next_at > now:
+                await asyncio.sleep(min(self._b50_next_at - now, interval))
+            try:
+                return await self.renderer.render(
+                    payload,
+                    ttl=int(self.config.get("b50_cache_ttl_seconds", 120) or 0),
+                    browser=str(self.config.get("render_browser", "auto") or "auto"),
+                    browser_path=str(self.config.get("render_browser_path", "") or ""),
+                    timeout=float(self.config.get("render_timeout_seconds", 20) or 20),
+                    template_name="b50.html",
+                    cache_salt=str(payload.get("username") or payload.get("name") or ""),
+                    prefix="b50",
+                )
+            finally:
+                self._b50_next_at = time.monotonic() + max(interval, 0)
 
     @filter.regex(r"^包(?:机|场)\s*\S")
     async def booking_add(self, event: AstrMessageEvent):
@@ -671,6 +889,10 @@ class DcsWhosinPlugin(Star):
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL)
     async def record_group_message(self, event: AstrMessageEvent):
+        try:
+            self._bot_self_id = str(event.get_self_id() or self._bot_self_id)
+        except Exception:
+            pass
         try:
             if event.get_message_type() == MessageType.FRIEND_MESSAGE:
                 logger.info(
@@ -878,7 +1100,7 @@ class DcsWhosinPlugin(Star):
                     max_chars = int(self.config.get("ltm_inject_max_chars", 2000) or 2000)
                 except (TypeError, ValueError):
                     max_chars = 2000
-                body = "\n".join(f"- {m}" for m in memory)[: max(200, max_chars)]
+                body = self._memory_pick(memory, req.prompt or "", max_chars)
                 req.system_prompt += (
                     "\n<system_reminder>长期群记忆（供参考，与本轮对话冲突时以本轮为准；不要逐条复述；"
                     "记忆里针对某个称呼的描述只属于那个人，不要套到当前对话者身上）：\n"
@@ -943,7 +1165,7 @@ class DcsWhosinPlugin(Star):
         if event.is_private_chat():
             memory = self._load_memory()
             if memory and "私聊记忆参考" not in (req.prompt or ""):
-                body = "\n".join(f"- {m}" for m in memory)[-3000:]
+                body = self._memory_pick(memory, req.prompt or "", 3000)
                 req.prompt = (
                     f"[私聊记忆参考（群里的长期记忆，供参考，不要复述）：\n{body}]\n" + (req.prompt or "")
                 )
@@ -1003,59 +1225,25 @@ class DcsWhosinPlugin(Star):
         Args:
             query(string): 搜索关键词，1 到 128 个字符
         '''
-        key = ""
-        provider = self.context.get_provider_by_id("deepseek")
-        if provider is not None:
-            keys = provider.provider_config.get("key") or []
-            if keys:
-                key = str(keys[0])
-        provider_ids = []
-        if not key:
-            cfg = self.context.get_config(umo=event.unified_msg_origin)
-            for item in cfg.get("provider", []) or []:
-                if not isinstance(item, dict):
-                    continue
-                provider_ids.append(str(item.get("id") or ""))
-                if str(item.get("id") or "") == "deepseek":
-                    keys = item.get("key") or []
-                    if keys:
-                        key = str(keys[0])
-                    break
-        if not key:
-            logger.warning(
-                f"[dcs_whosin] web_search 未找到密钥：umo={event.unified_msg_origin!r} 配置内 provider={provider_ids}"
-            )
-            return "联网搜索暂时不可用，请稍后再试。"
         query = str(query or "").strip()[:128]
         if not query:
             return "搜索关键词为空。"
-        import aiohttp
-
-        try:
-            timeout = aiohttp.ClientTimeout(total=20)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(
-                    "https://api.deepseek.com/v1/tools/search",
-                    headers={"Authorization": f"Bearer {key}"},
-                    json={"query": query, "count": 5},
-                ) as resp:
-                    if resp.status != 200:
-                        return f"联网搜索失败（HTTP {resp.status}），请稍后再试。"
-                    data = await resp.json()
-        except Exception as exc:
-            return f"联网搜索失败：{exc!r}"
-        results = data.get("results") or []
-        if not results:
+        items = await web_search_plain(query, 5)
+        if not items:
+            if web_search_exhausted():
+                return "搜索源暂时都被限流了，没有拿到结果。请过一两分钟再让我搜一次。"
             return "没有搜到相关结果。"
         lines = []
-        for item in results[:5]:
-            title = str(item.get("title") or "").strip()
-            summary = str(item.get("summary") or item.get("snippet") or "").strip()
-            link = str(item.get("url") or "").strip()
-            date = str(item.get("date") or "")[:10]
+        for item in items:
+            date = item.get("date") or ""
             suffix = f"（{date}）" if date else ""
-            lines.append(f"- {title}{suffix}\n  {summary[:500]}\n  来源：{link}")
-        return "搜索结果如下（请尽量详细、准确地把有用信息转述给用户，不要照抄）：\n" + "\n".join(lines)
+            lines.append(
+                f"- {item['title']}{suffix}\n  {item['summary']}\n  来源：{item['url']}"
+            )
+        return (
+            "搜索结果如下（请尽量详细、准确地把有用信息转述给用户，不要照抄）：\n"
+            + "\n".join(lines)
+        )
 
     @llm_tool(name="moegirl_lookup")
     async def moegirl_lookup(self, event: AstrMessageEvent, keyword: str):
@@ -1066,69 +1254,41 @@ class DcsWhosinPlugin(Star):
         Args:
             keyword(string): 词条名或关键词，如「宵崎奏」「世界计划」
         '''
-        key = ""
-        provider = self.context.get_provider_by_id("deepseek")
-        if provider is not None:
-            keys = provider.provider_config.get("key") or []
-            if keys:
-                key = str(keys[0])
-        if not key:
-            return "萌娘百科查询暂时不可用：未找到 DeepSeek 密钥。"
         keyword = str(keyword or "").strip()[:60]
         if not keyword:
             return "查询关键词为空。"
-        import aiohttp
-
-        def clean(text):
-            return re.sub(r"<[^>]+>", "", str(text or "")).strip()
-
-        timeout = aiohttp.ClientTimeout(total=30)
-        results = []
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async def search(query):
-                try:
-                    async with session.post(
-                        "https://api.deepseek.com/v1/tools/search",
-                        headers={"Authorization": f"Bearer {key}"},
-                        json={"query": query, "count": 4},
-                    ) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            return data.get("results") or []
-                except Exception:
-                    pass
-                return []
-
-            results = await search(
-                f"{keyword} site:zh.moegirl.org.cn OR site:moegirl.uk OR site:moegirl.icu"
+        sites = "site:zh.moegirl.org.cn OR site:moegirl.uk OR site:moegirl.icu"
+        # 直接用词条名打解析接口，命中就不用等搜索，失败再退回搜索
+        direct = ""
+        for host in ("moegirl.uk", "moegirl.icu", "zh.moegirl.org.cn"):
+            try:
+                direct = await web_fetch_text(f"https://{host}/{quote(keyword)}", 6000)
+            except Exception:
+                direct = ""
+            if len(direct) >= 400:
+                break
+        if len(direct) >= 400:
+            return (
+                f"萌娘百科词条「{keyword}」正文节选：\n"
+                + direct
+                + "\n（请尽量详细、准确地把词条内容转述给用户，不要照抄；以词条内容为准）"
             )
-            if not results:
-                results = await search(f"{keyword} 萌娘百科")
-            if not results:
-                return "萌娘百科上没查到相关词条。"
-            best = next(
-                (str(item.get("url") or "") for item in results if "zh.moegirl.org.cn" in str(item.get("url") or "")),
-                "",
-            )
-            content = ""
-            if best:
-                try:
-                    async with session.post(
-                        "https://api.deepseek.com/v1/tools/fetch",
-                        headers={"Authorization": f"Bearer {key}"},
-                        json={"url": best},
-                    ) as resp:
-                        if resp.status == 200:
-                            page = await resp.json()
-                            content = str(page.get("content") or "")[:6000]
-                except Exception:
-                    content = ""
-        lines = []
-        for item in results[:3]:
-            title = clean(item.get("title"))
-            summary = clean(item.get("summary") or item.get("snippet"))
-            link = str(item.get("url") or "").strip()
-            lines.append(f"- {title}\n  {summary[:500]}\n  {link}")
+        items = await web_search_site(keyword, sites, f"{keyword} 萌娘百科", 3)
+        if not items:
+            return "萌娘百科上没查到相关词条。"
+        # 只取萌百自己的词条页，避免被无关结果带偏
+        best = next(
+            (
+                i["url"]
+                for i in items
+                if re.search(r"(?:zh\.moegirl\.org\.cn|moegirl\.uk|moegirl\.icu)/[^?]", i["url"])
+            ),
+            "",
+        )
+        if not best:
+            return "萌娘百科上没查到相关词条。"
+        content = await web_fetch_text(best, 6000) if best else ""
+        lines = [f"- {i['title']}\n  {i['summary']}\n  {i['url']}" for i in items]
         text = "萌娘百科查询结果：\n" + "\n".join(lines)
         if content:
             text += "\n\n词条正文节选：\n" + content
@@ -1406,6 +1566,13 @@ class DcsWhosinPlugin(Star):
             for k in ("定数", "难度", "等级", "master", "expert", "remaster", "advanced", "basic", "bpm", "紫", "红", "黄", "绿", "白", "dx", "std", "曲", "歌", "+")
         )
         bucket = "replies" if is_aquadx else ("replies_guess" if (is_reply_to_bot or looks_chart) else "")
+        if not bucket:
+            try:
+                self_id = str(event.get_self_id() or "")
+            except Exception:
+                self_id = ""
+            if sender and sender not in (self_id, "3565630243") and len(text) <= 500:
+                bucket = "replies_guess"
         if bucket:
             items = pending.get(bucket)
             if not isinstance(items, list):
@@ -1433,10 +1600,22 @@ class DcsWhosinPlugin(Star):
     async def _aquiz_fetch_titles(self) -> list[dict]:
         import aiohttp
 
-        url = "https://www.diving-fish.com/api/maimaidxprober/music_data"
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25)) as sess:
-            async with sess.get(url, headers={"User-Agent": "Mozilla/5.0"}) as resp:
-                data = await resp.json()
+        data = None
+        try:
+            cache = self.plugin_data_dir / "chart_data_maimai.json"
+            if cache.exists():
+                data = json.loads(cache.read_text(encoding="utf-8"))
+        except Exception:
+            data = None
+        if not isinstance(data, list) or not data:
+            url = "https://www.diving-fish.com/api/maimaidxprober/music_data"
+            try:
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25)) as sess:
+                    async with sess.get(url, headers={"User-Agent": "Mozilla/5.0"}) as resp:
+                        data = await resp.json()
+            except Exception as exc:
+                logger.warning(f"[dcs_whosin] 谱面问答：曲库获取失败 {exc!r}")
+                return []
         out = []
         seen = set()
         for item in data if isinstance(data, list) else []:
@@ -1452,14 +1631,62 @@ class DcsWhosinPlugin(Star):
             dss = item.get("ds") or []
             out.append(
                 {
+                    "id": str(item.get("id") or ""),
                     "title": title,
                     "type": str(item.get("type") or ""),
                     "level": str(levels[-1]) if levels else "",
                     "ds": dss[-1] if dss else None,
                 }
             )
-        random.shuffle(out)
+        out = await self._aquiz_rank_titles(out)
+        try:
+            (self.plugin_data_dir / "aquiz_ranked_titles.json").write_text(
+                json.dumps([it["title"] for it in out], ensure_ascii=False, indent=1), encoding="utf-8"
+            )
+        except Exception:
+            pass
+        logger.info(
+            "[dcs_whosin] 谱面问答：热门排序前 10："
+            + "、".join(str(it.get("title") or "") for it in out[:10])
+        )
         return out
+
+    async def _aquiz_rank_titles(self, items: list[dict]) -> list[dict]:
+        import aiohttp
+
+        stats = None
+        path = self.plugin_data_dir / "aquiz_chart_stats.json"
+        try:
+            if path.exists() and time.time() - path.stat().st_mtime < 12 * 3600:
+                stats = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            stats = None
+        if not isinstance(stats, dict):
+            try:
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as sess:
+                    async with sess.get(
+                        "https://www.diving-fish.com/api/maimaidxprober/chart_stats",
+                        headers={"User-Agent": "Mozilla/5.0"},
+                    ) as resp:
+                        stats = await resp.json()
+                path.write_text(json.dumps(stats, ensure_ascii=False), encoding="utf-8")
+            except Exception as exc:
+                logger.warning(f"[dcs_whosin] 谱面问答：热度统计获取失败 {exc!r}")
+                stats = {}
+        charts = stats.get("charts") if isinstance(stats, dict) else {}
+        scores = {}
+        for sid, rows in (charts or {}).items():
+            total = 0.0
+            if isinstance(rows, list):
+                for row in rows:
+                    try:
+                        total += float(row.get("cnt") or 0)
+                    except Exception:
+                        pass
+            scores[str(sid)] = total
+        def key(it):
+            return (-scores.get(str(it.get("id") or ""), 0), str(it.get("title") or ""))
+        return sorted(items, key=key)
 
     async def _aquiz_find_aquadx(self, bot, group: int) -> str:
         try:
@@ -1490,9 +1717,75 @@ class DcsWhosinPlugin(Star):
             if not isinstance(m, dict):
                 continue
             label = (str(m.get("card") or "") + " " + str(m.get("nickname") or "")).lower()
-            if "aquadx" in label or ("aqua" in label and "dx" in label):
+            if "aquadx" in label or "munet" in label or ("aqua" in label and "dx" in label):
                 return str(m.get("user_id") or "").strip()
         return ""
+
+    @staticmethod
+    def _aquiz_segments_text(segments) -> str:
+        parts = []
+
+        def walk(seg):
+            if not isinstance(seg, dict):
+                return
+            stype = str(seg.get("type") or "")
+            data = seg.get("data") or {}
+            if stype == "text":
+                txt = str(data.get("text") or "").strip()
+                if txt:
+                    parts.append(txt)
+            elif stype == "image":
+                parts.append("[图片]")
+            elif stype == "forward":
+                for sub in data.get("content") or []:
+                    if not isinstance(sub, dict):
+                        continue
+                    sub_msg = sub.get("message")
+                    if isinstance(sub_msg, list):
+                        for s in sub_msg:
+                            walk(s)
+                    else:
+                        walk(sub)
+
+        for seg in segments or []:
+            walk(seg)
+        return "\n".join(parts)
+
+    async def _aquiz_dump_history(self, bot, group: int) -> list[dict]:
+        try:
+            data = await bot.call_action("get_group_msg_history", group_id=group, count=30)
+        except Exception as exc:
+            logger.warning(f"[dcs_whosin] 谱面问答历史读取失败：{exc!r}")
+            return []
+        msgs = data.get("messages") if isinstance(data, dict) else data
+        try:
+            (self.plugin_data_dir / "aquiz_history.json").write_text(
+                json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8"
+            )
+        except Exception:
+            pass
+        out = []
+        for m in msgs if isinstance(msgs, list) else []:
+            if not isinstance(m, dict):
+                continue
+            sender = m.get("sender") or {}
+            msg = m.get("message")
+            text = ""
+            if isinstance(msg, list):
+                text = self._aquiz_segments_text(msg)
+            elif isinstance(msg, str):
+                text = msg
+            if not text:
+                text = str(m.get("raw_message") or "")
+            out.append(
+                {
+                    "ts": float(m.get("time") or 0),
+                    "sender": str(sender.get("user_id") or m.get("user_id") or ""),
+                    "name": str(sender.get("card") or sender.get("nickname") or ""),
+                    "text": text[:4000],
+                }
+            )
+        return out
 
     async def _aquiz_write_report(self) -> None:
         path = self._aquiz_results_file()
@@ -1521,7 +1814,7 @@ class DcsWhosinPlugin(Star):
             lines.append(f"- 水鱼参考：{r.get('level') or '?'} / 定数 {ds if ds is not None else '?'}")
             if replies:
                 for rep in replies[:2]:
-                    lines.append(f"- aquadx：{str(rep.get('text') or '')[:600]}")
+                    lines.append(f"- aquadx：{str(rep.get('text') or '')[:2000]}")
             else:
                 lines.append("- aquadx：无回复（超时）")
             lines.append("")
@@ -1531,7 +1824,30 @@ class DcsWhosinPlugin(Star):
         except Exception:
             pass
 
+    async def _aquiz_history_once(self) -> None:
+        group = self._aquiz_target_group()
+        if not group.isdigit():
+            return
+        bot = None
+        for _ in range(30):
+            bot = self._aquiz_bot()
+            if bot is not None:
+                break
+            await asyncio.sleep(5)
+        if bot is None:
+            return
+        hist = await self._aquiz_dump_history(bot, int(group))
+        logger.info(f"[dcs_whosin] 谱面问答历史已导出（{len(hist)} 条）")
+
     async def _aquiz_loop(self) -> None:
+        try:
+            await self._aquiz_loop_impl()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception(f"[dcs_whosin] 谱面问答任务异常：{exc!r}")
+
+    async def _aquiz_loop_impl(self) -> None:
         state = self._load_aquiz_state()
         if state.get("done"):
             logger.info("[dcs_whosin] 谱面问答任务已完成，跳过")
@@ -1549,9 +1865,29 @@ class DcsWhosinPlugin(Star):
         if bot is None:
             logger.warning("[dcs_whosin] 谱面问答：未找到 OneBot 客户端")
             return
-        try:
-            groups = await bot.call_action("get_group_list")
-            group_ids = {str((g or {}).get("group_id")) for g in (groups or []) if isinstance(g, dict)}
+        while True:
+            try:
+                login = await bot.call_action("get_login_info")
+                if isinstance(login, dict) and login.get("user_id"):
+                    logger.info("[dcs_whosin] 谱面问答：QQ 已登录，开始执行")
+                    break
+            except Exception:
+                pass
+            if not self._aquiz_in_window():
+                logger.warning("[dcs_whosin] 谱面问答：等待登录超时（已到窗口结束）")
+                return
+            await asyncio.sleep(15)
+        await self._aquiz_dump_history(bot, int(group))
+        groups = None
+        for _ in range(6):
+            try:
+                groups = await bot.call_action("get_group_list")
+                break
+            except Exception as exc:
+                logger.warning(f"[dcs_whosin] 谱面问答：获取群列表失败，稍后重试 {exc!r}")
+                await asyncio.sleep(10)
+        if isinstance(groups, list):
+            group_ids = {str((g or {}).get("group_id")) for g in groups if isinstance(g, dict)}
             if group not in group_ids:
                 logger.warning(f"[dcs_whosin] 谱面问答：机器人不在目标群 {group}，任务中止")
                 state["done"] = True
@@ -1560,9 +1896,9 @@ class DcsWhosinPlugin(Star):
                 self._save_aquiz_state(state)
                 return
             logger.info(f"[dcs_whosin] 谱面问答：目标群 {group} 已在列表")
-        except Exception as exc:
-            logger.warning(f"[dcs_whosin] 谱面问答：获取群列表失败 {exc!r}")
         aquadx = await self._aquiz_find_aquadx(bot, int(group))
+        if not aquadx:
+            aquadx = str(self.config.get("aquiz_bot_qq", "3087530651") or "").strip()
         state["aquadx_qq"] = aquadx or state.get("aquadx_qq", "")
         state["updated"] = time.strftime("%Y-%m-%d %H:%M")
         self._save_aquiz_state(state)
@@ -1570,6 +1906,7 @@ class DcsWhosinPlugin(Star):
         while not self._aquiz_in_window():
             await asyncio.sleep(30)
         titles = await self._aquiz_fetch_titles()
+        logger.info(f"[dcs_whosin] 谱面问答：曲库 {len(titles)} 首")
         if not titles:
             logger.warning("[dcs_whosin] 谱面问答：未获取到曲目")
             return
@@ -1599,7 +1936,7 @@ class DcsWhosinPlugin(Star):
                 continue
             send_time = time.time()
             self._aquiz_pending = {"title": title, "aquadx_qq": aquadx, "replies": []}
-            query = f"{title}是什么歌？"
+            query = f"{title}是什么歌"
             try:
                 await bot.send_group_msg(group_id=int(group), message=[{"type": "text", "data": {"text": query}}])
             except Exception as exc:
@@ -1616,7 +1953,13 @@ class DcsWhosinPlugin(Star):
                 pending = self._aquiz_pending or {}
                 if pending.get("replies"):
                     break
-                await asyncio.sleep(2)
+                if aquadx:
+                    hist = await self._aquiz_dump_history(bot, int(group))
+                    late = [h for h in hist if h.get("sender") == aquadx and h.get("ts", 0) >= send_time - 2 and h.get("text")]
+                    if late:
+                        pending["replies"] = late
+                        break
+                await asyncio.sleep(8)
             replies = (self._aquiz_pending or {}).get("replies") or []
             if not replies:
                 replies = (self._aquiz_pending or {}).get("replies_guess") or []
@@ -1648,8 +1991,8 @@ class DcsWhosinPlugin(Star):
             if not replies:
                 logger.info(f"[dcs_whosin] 谱面问答无回复：{title}")
                 consecutive_empty += 1
-                if consecutive_empty >= 1:
-                    logger.warning("[dcs_whosin] 谱面问答首条无回复，任务停止（检查 aquadx 是否在群/是否响应）")
+                if consecutive_empty >= 3:
+                    logger.warning("[dcs_whosin] 谱面问答连续 3 次无回复，任务停止（检查 aquadx/ MuNET 是否在线或屏蔽了机器人）")
                     state["error"] = "no_response"
                     state["done"] = True
                     state["updated"] = time.strftime("%Y-%m-%d %H:%M")
@@ -1667,13 +2010,240 @@ class DcsWhosinPlugin(Star):
         await self._aquiz_write_report()
         logger.info(f"[dcs_whosin] 谱面问答任务完成：已发送 {sent} 条")
 
-    def _search_key(self) -> str:
-        provider = self.context.get_provider_by_id("deepseek")
-        if provider is not None:
-            keys = provider.provider_config.get("key") or []
-            if keys:
-                return str(keys[0])
+    def _read_console_bot_qq(self) -> str:
+        try:
+            path = Path(os.path.expandvars(r"%LOCALAPPDATA%")) / "DCSBot" / "console" / "settings.json"
+            if path.exists():
+                data = json.loads(path.read_text(encoding="utf-8-sig"))
+                return str(data.get("BotQQ") or "").strip()
+        except Exception:
+            pass
         return ""
+
+    async def _image_cleanup_loop(self) -> None:
+        while True:
+            try:
+                hour = int(self.config.get("image_cleanup_hour", 4) or 4) % 24
+            except (TypeError, ValueError):
+                hour = 4
+            now = datetime.now()
+            nxt = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+            if nxt <= now:
+                nxt += timedelta(days=1)
+            await asyncio.sleep(max(60, (nxt - now).total_seconds()))
+            try:
+                await self._run_image_cleanup()
+            except Exception as exc:
+                logger.warning(f"[dcs_whosin] 图片清理失败：{exc!r}")
+
+    def _cleanup_b50_cover_cache(self, deleted: int, freed: int, cutoff: float) -> tuple[int, int]:
+        """清 b50 封面缓存里过期的图（跟图片缓存一起按天数清）。"""
+        cache = getattr(self, "_b50_covers", None)
+        if cache is None or cache.cache_dir is None or not cache.cache_dir.exists():
+            return deleted, freed
+        for f in cache.cache_dir.glob("*"):
+            try:
+                if not f.is_file():
+                    continue
+                st = f.stat()
+                if st.st_mtime < cutoff:
+                    size = st.st_size
+                    f.unlink()
+                    deleted += 1
+                    freed += size
+            except OSError:
+                pass
+        cached = getattr(cache, "_cache", None)
+        if isinstance(cached, dict):
+            cached.clear()
+        return deleted, freed
+
+    async def _run_image_cleanup(self) -> str:
+        if not self.config.get("image_cleanup_enable", True):
+            return "图片清理未启用"
+        try:
+            days = max(1, int(self.config.get("image_cleanup_days", 7) or 7))
+        except (TypeError, ValueError):
+            days = 7
+        cutoff = time.time() - days * 86400
+        deleted = 0
+        freed = 0
+        qq_dirs = []
+        if self.config.get("image_cleanup_qq", True):
+            qq = self._bot_self_id or self._read_console_bot_qq()
+            base = Path.home() / "Documents" / "Tencent Files"
+            candidates = []
+            if base.exists():
+                if qq and (base / qq).exists():
+                    candidates = [base / qq]
+                else:
+                    candidates = [d for d in base.iterdir() if d.is_dir()]
+            for d in candidates:
+                pic = d / "nt_qq" / "nt_data" / "Pic"
+                if not pic.is_dir():
+                    continue
+                qq_dirs.append(str(pic))
+                for ori in pic.glob("*/Ori"):
+                    if not ori.is_dir():
+                        continue
+                    for f in ori.glob("*"):
+                        try:
+                            if not f.is_file():
+                                continue
+                            st = f.stat()
+                            if st.st_mtime < cutoff:
+                                size = st.st_size
+                                f.unlink()
+                                deleted += 1
+                                freed += size
+                        except Exception:
+                            pass
+        self._cleanup_b50_cover_cache(deleted, freed, cutoff)
+        if self.config.get("image_cleanup_astrbot_temp", True):
+            try:
+                from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
+                temp_root = Path(get_astrbot_temp_path())
+            except Exception:
+                temp_root = Path(tempfile.gettempdir()) / "astrbot"
+            if temp_root.exists():
+                for f in temp_root.rglob("*"):
+                    try:
+                        if not f.is_file() or f.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"):
+                            continue
+                        st = f.stat()
+                        if st.st_mtime < cutoff:
+                            size = st.st_size
+                            f.unlink()
+                            deleted += 1
+                            freed += size
+                    except Exception:
+                        pass
+        msg = f"图片清理完成：删除 {deleted} 个文件，释放 {freed / 1048576:.1f} MB（保留最近 {days} 天）"
+        logger.info("[dcs_whosin] " + msg + "；QQ 目录：" + "；".join(qq_dirs[:3]))
+        return msg
+
+    @filter.regex(r"^/?imgclean\b|^/?图片清理\b")
+    async def imgclean_cmd(self, event: AstrMessageEvent):
+        if not event.is_at_or_wake_command:
+            return
+        if not self._policy_allows(event):
+            return
+        if not await self._is_points_admin(event):
+            yield event.plain_result("这个指令只有管理员和群主能用哦")
+            return
+        arg = re.sub(r"^/?imgclean\b|^/?图片清理\b", "", event.get_message_str().strip()).strip().lower()
+        if arg in ("now", "立即", "清理"):
+            msg = await self._run_image_cleanup()
+            yield event.plain_result(msg)
+            return
+        try:
+            days = int(self.config.get("image_cleanup_days", 7) or 7)
+        except (TypeError, ValueError):
+            days = 7
+        try:
+            hour = int(self.config.get("image_cleanup_hour", 4) or 4)
+        except (TypeError, ValueError):
+            hour = 4
+        yield event.plain_result(
+            f"图片清理：{'开启' if self.config.get('image_cleanup_enable', True) else '关闭'}，"
+            f"保留 {days} 天，每天 {hour:02d}:00 执行；发「/imgclean now」立即清理。"
+        )
+
+    def _pc_allowed(self, event: AstrMessageEvent) -> bool:
+        if not self.config.get("pc_control_enable", True):
+            return False
+        try:
+            private = bool(event.is_private_chat())
+        except Exception:
+            return False
+        admin_qq = str(self.config.get("pc_admin_qq", "3565630243") or "3565630243").strip()
+        sender = str(event.get_sender_id() or "").strip()
+        if private:
+            return sender == admin_qq
+        group = str(event.get_group_id() or "").strip()
+        if not group:
+            return False
+        allowed_group = str(self.config.get("pc_control_group", "1072977398") or "1072977398").strip()
+        if group == allowed_group:
+            return True
+        owner_group = str(self.config.get("pc_control_group_admin", "1030377150") or "1030377150").strip()
+        return group == owner_group and sender == admin_qq
+
+    @llm_tool(name="opencode_task")
+    async def opencode_task(self, event: AstrMessageEvent, task: str, workdir: str = ""):
+        """用本机 OpenCode agent 执行复杂的电脑任务（读写文件、运行命令、多步操作）。
+
+        只有授权操作员在私聊中可用；任务由本机 OpenCode CLI 在指定工作目录执行。
+
+        Args:
+            task(string): 要交给 OpenCode 执行的任务描述
+            workdir(string): 工作目录（留空使用默认工作区）
+        """
+        if not self._pc_allowed(event):
+            return "没有权限：电脑控制只允许授权操作员在私聊中使用。"
+        task = str(task or "").strip()
+        if not task:
+            return "任务为空。"
+        task = task[:4000]
+        try:
+            timeout = max(30, min(900, int(self.config.get("opencode_timeout_s", 300) or 300)))
+        except (TypeError, ValueError):
+            timeout = 300
+        exe = str(self.config.get("opencode_exe", "") or "").strip()
+        if not exe:
+            exe = str(Path(os.environ.get("APPDATA", "")) / "npm" / "node_modules" / "opencode-ai" / "bin" / "opencode.exe")
+        if not Path(exe).exists():
+            return f"OpenCode 可执行文件不存在：{exe}"
+        base = str(self.config.get("opencode_workdir", "") or self.plugin_data_dir / "opencode_workspace")
+        cwd = str(workdir or base).strip()
+        try:
+            Path(cwd).mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            return f"工作目录不可用：{exc!r}"
+        args = [exe, "run", "--auto", "--format", "default", "--dir", cwd, task]
+        started = time.time()
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd,
+            )
+            try:
+                out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                return f"OpenCode 执行超时（{timeout} 秒），已终止。"
+        except Exception as exc:
+            return f"OpenCode 启动失败：{exc!r}"
+        code = proc.returncode
+        text = (out or b"").decode("utf-8", "replace")
+        err_text = (err or b"").decode("utf-8", "replace")
+        text = re.sub(r"\x1b\[[0-9;]*m", "", text).strip()
+        err_text = re.sub(r"\x1b\[[0-9;]*m", "", err_text).strip()
+        elapsed = time.time() - started
+        result = text[:6000] if text else (err_text[:4000] or "（无输出）")
+        if code not in (0, None) and err_text and err_text not in result:
+            result += "\n[stderr]\n" + err_text[:1500]
+        try:
+            audit = {
+                "ts": time.time(),
+                "qq": str(event.get_sender_id() or ""),
+                "group": str(event.get_group_id() or ""),
+                "cwd": cwd,
+                "task": task[:500],
+                "code": code,
+                "elapsed": round(elapsed, 1),
+                "out": result[:800],
+            }
+            with (self.plugin_data_dir / "pc_audit.jsonl").open("a", encoding="utf-8") as f:
+                f.write(json.dumps(audit, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        return f"OpenCode 完成（退出码 {code}，用时 {elapsed:.0f}s）：\n{result}"
 
     async def _load_chart_data(self, game: str):
         cache = self.plugin_data_dir / f"chart_data_{game}.json"
@@ -1703,27 +2273,6 @@ class DcsWhosinPlugin(Star):
             pass
         return data
 
-    async def _fetch_any_page(self, session, url: str, key: str) -> str:
-        if "wikiwiki.jp" in url or "sega.jp" in url:
-            try:
-                async with session.get(url, headers={"User-Agent": "Mozilla/5.0"}) as resp:
-                    if resp.status == 200:
-                        return self._html_to_text(await resp.text(errors="ignore"))
-            except Exception:
-                pass
-        try:
-            async with session.post(
-                "https://api.deepseek.com/v1/tools/fetch",
-                headers={"Authorization": f"Bearer {key}"},
-                json={"url": url},
-            ) as resp:
-                if resp.status == 200:
-                    page = await resp.json()
-                    return str(page.get("content") or "")
-        except Exception:
-            pass
-        return ""
-
     @llm_tool(name="rhythm_lookup")
     async def rhythm_lookup(self, event: AstrMessageEvent, keyword: str, game: str = "maimai"):
         '''查询音游（CHUNITHM/中二节奏、maimai/舞萌DX）的角色、曲目与活动资料。
@@ -1734,9 +2283,6 @@ class DcsWhosinPlugin(Star):
             keyword(string): 角色名、曲名或关键词
             game(string): 游戏名，填 chunithm 或 maimai，默认 maimai
         '''
-        key = self._search_key()
-        if not key:
-            return "音游资料查询暂时不可用：未找到 DeepSeek 密钥。"
         game = str(game or "").strip().lower()
         if game not in ("chunithm", "maimai"):
             game = "maimai"
@@ -1749,42 +2295,20 @@ class DcsWhosinPlugin(Star):
         keyword = str(keyword or "").strip()[:40]
         if not keyword:
             return "查询关键词为空。"
-        import aiohttp
-
-        async def run_query(session, query):
-            try:
-                async with session.post(
-                    "https://api.deepseek.com/v1/tools/search",
-                    headers={"Authorization": f"Bearer {key}"},
-                    json={"query": query, "count": 6},
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        return data.get("results") or []
-            except Exception:
-                pass
-            return []
-
-        results = []
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=45)) as session:
-            results = await run_query(session, f"{keyword} {sites}")
-            if not results:
-                results = await run_query(session, f"{keyword} {cn} wiki")
-            if not results:
-                return f"{cn}的「{keyword}」没有查到相关资料。"
-            pick = next(
-                (str(i.get("url") or "") for i in results if "wikiwiki.jp" in str(i.get("url") or "")),
-                "",
-            ) or str(results[0].get("url") or "")
-            snippet_lines = []
-            for item in results[:3]:
-                title = re.sub(r"<[^>]+>", "", str(item.get("title") or "")).strip()
-                summary = re.sub(r"<[^>]+>", "", str(item.get("summary") or item.get("snippet") or "")).strip()
-                snippet_lines.append(f"- {title}\n  {summary[:300]}\n  {item.get('url') or ''}")
-            content = await self._fetch_any_page(session, pick, key) if pick else ""
-        text = f"{cn}相关资料：\n" + "\n".join(snippet_lines)
+        items = await web_search_site(keyword, sites, f"{keyword} {cn} wiki", 3)
+        if not items:
+            items = await web_search_plain(f"{keyword} {cn}", 3)
+        if not items:
+            return f"{cn}的「{keyword}」没有查到相关资料。"
+        pick = next(
+            (i["url"] for i in items if "wikiwiki.jp" in i["url"] or "sega.jp" in i["url"]),
+            items[0]["url"],
+        )
+        content = await web_fetch_text(pick, 6000) if pick else ""
+        lines = [f"- {i['title']}\n  {i['summary']}\n  {i['url']}" for i in items]
+        text = f"{cn}相关资料：\n" + "\n".join(lines)
         if content:
-            text += "\n\n页面正文节选：\n" + content[:6000]
+            text += "\n\n页面正文节选：\n" + content
         text += "\n（请尽量详细、准确地把资料转述给用户，不要照抄；数字与设定以资料为准）"
         return text
 
@@ -1792,7 +2316,7 @@ class DcsWhosinPlugin(Star):
     async def chart_lookup(self, event: AstrMessageEvent, keyword: str, game: str = "maimai"):
         '''查询音游谱面信息（难度、定数、物量、谱师）。
 
-        数据来自水鱼查分器曲库，覆盖 maimai/舞萌DX 与 CHUNITHM/中二节奏。
+        数据来自水鱼查分器曲库，覆盖 maimai/舞萌DX 与 CHUNITHM/中二节奏；maimai 会再从 v.wmc.pub 补社区评分与标签。
 
         Args:
             keyword(string): 曲名（可部分匹配）
@@ -1806,30 +2330,12 @@ class DcsWhosinPlugin(Star):
             return "查询关键词为空。"
         data = await self._load_chart_data(game)
         if data is None:
-            key = self._search_key()
-            if not key:
-                return "谱面查询暂时不可用：曲库获取失败。"
             cn = "中二节奏" if game == "chunithm" else "舞萌DX"
-            import aiohttp
-
-            try:
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
-                    async with session.post(
-                        "https://api.deepseek.com/v1/tools/search",
-                        headers={"Authorization": f"Bearer {key}"},
-                        json={"query": f"{keyword} {cn} 谱面 定数", "count": 4},
-                    ) as resp:
-                        if resp.status == 200:
-                            payload = await resp.json()
-                            items = payload.get("results") or []
-                            lines = [
-                                f"- {re.sub(r'<[^>]+>', '', str(i.get('title') or '')).strip()}\n  {str(i.get('summary') or i.get('snippet') or '')[:300]}\n  {i.get('url') or ''}"
-                                for i in items[:3]
-                            ]
-                            return "曲库不可用，按搜索给出的谱面信息：\n" + "\n".join(lines)
-            except Exception:
-                pass
-            return "谱面查询暂时不可用，请稍后再试。"
+            items = await web_search_plain(f"{keyword} {cn} 谱面 定数", 3)
+            if not items:
+                return "谱面查询暂时不可用，请稍后再试。"
+            lines = [f"- {i['title']}\n  {i['summary']}\n  {i['url']}" for i in items]
+            return "曲库不可用，按搜索给出的谱面信息：\n" + "\n".join(lines)
         kw = keyword.lower()
         hits = []
         for item in data:
@@ -1883,8 +2389,101 @@ class DcsWhosinPlugin(Star):
                     rows.append(row)
             out.append("\n".join(head + rows))
         text = "谱面信息（数据来自水鱼查分器曲库）：\n\n" + "\n\n".join(out)
+        if game == "maimai":
+            extra = await self._vchart_extra(hits[:3])
+            if extra:
+                text += "\n\n" + extra
         text += "\n（请把难度、定数、物量等信息准确地告诉用户；没有的难度不要编）"
         return text
+
+    async def _vchart_extra(self, items: list) -> str:
+        """从 v.wmc.pub 补社区评分、标签与评论（只读，失败就安静跳过）。"""
+        if not items or not self.config.get("vchart_enable", True):
+            return ""
+        key = str(self.config.get("vchart_api_key", "") or "").strip()
+        sem = asyncio.Semaphore(4)
+
+        async def one(song_id: int, diff: int, title: str) -> str:
+            async with sem:
+                try:
+                    chart = await dcs_vchart.chart_by_song_id(song_id, diff, key)
+                except dcs_vchart.VChartError:
+                    return ""
+                if not chart:
+                    return ""
+                ck = str(chart.get("chartKey") or "")
+                if not ck:
+                    return ""
+                lines = [f"《{title}》{dcs_vchart.DIFF_NAME.get(diff, diff)}："]
+                lines.append(
+                    "  评分 {:.2f}/5（{} 人）｜浏览 {}｜评论 {}".format(
+                        float(chart.get("ratingAverage") or 0),
+                        int(chart.get("ratingCount") or 0),
+                        int(chart.get("views") or 0),
+                        int(chart.get("commentCount") or 0),
+                    )
+                )
+                ana = chart.get("configAnalysis") or {}
+                if ana:
+                    lines.append(
+                        "  物量：总 {}｜Tap {} / Hold {} / Slide {} / Touch {} / Break {}".format(
+                            int(ana.get("totalNotes") or 0), int(ana.get("tapCount") or 0),
+                            int(ana.get("holdCount") or 0), int(ana.get("slideCount") or 0),
+                            int(ana.get("touchCount") or 0), int(ana.get("breakCount") or 0),
+                        )
+                    )
+                    lines.append(
+                        "  平均NPS {:.2f}｜峰值 {:.2f}｜时长 {:.0f}s".format(
+                            float(ana.get("averageNps") or 0),
+                            float(ana.get("peakNps") or 0),
+                            float(ana.get("durationSeconds") or 0),
+                        )
+                    )
+                try:
+                    tags = (await dcs_vchart.fetch_tags(ck, key)).get("tags") or {}
+                except dcs_vchart.VChartError:
+                    tags = {}
+                dc = tags.get("difficultyClassification") or {}
+                if dc.get("label"):
+                    lines.append(
+                        "  难度判定：{}｜预估 {}｜偏差 {}".format(
+                            dc.get("label"), dc.get("estimatedLevel"), dc.get("deviation")
+                        )
+                    )
+                radar = [f"{r.get('label')} {r.get('score')}" for r in (tags.get("radarTags") or [])[:6]]
+                if radar:
+                    lines.append("  特征轴：" + " / ".join(radar))
+                evals = [f"{r.get('label')} {r.get('score')}" for r in (tags.get("evaluationTags") or [])[:4]]
+                if evals:
+                    lines.append("  评价：" + " / ".join(evals))
+                try:
+                    comments = await dcs_vchart.fetch_comments(ck, key, 2)
+                except dcs_vchart.VChartError:
+                    comments = []
+                for c in comments:
+                    body = str(c.get("body") or "").replace("\n", " ")[:70]
+                    if body:
+                        lines.append(f"  评论（{c.get('author') or '匿名'}）：{body}")
+                return "\n".join(lines)
+
+        jobs = []
+        for item in items[:2]:
+            try:
+                song_id = int(item.get("id"))
+            except (TypeError, ValueError):
+                continue
+            title = str(item.get("title") or "").strip()
+            levels = item.get("level") or []
+            for idx in range(min(5, len(levels)) - 1, -1, -1):
+                if levels[idx] in (None, ""):
+                    continue
+                jobs.append(one(song_id, idx + 2, title))
+        if not jobs:
+            return ""
+        blocks = [b for b in await asyncio.gather(*jobs) if b]
+        if not blocks:
+            return "v.wmc.pub 上还没有这张谱的评分数据。"
+        return "v.wmc.pub 社区评分与评价：\n" + "\n".join(blocks)
 
     def _policy_allows(self, event: AstrMessageEvent) -> bool:
         if event.is_private_chat():
@@ -2115,6 +2714,60 @@ class DcsWhosinPlugin(Star):
         except Exception:
             return []
 
+    def _memory_pick(self, lines: list[str], query: str, max_chars: int) -> str:
+        """按与当前消息的相关度挑记忆条目，再按原顺序补足字数预算。"""
+        if not lines:
+            return ""
+        text = str(query or "")
+        ascii_tokens = set(re.findall(r"[a-z0-9_]{2,}", text.lower()))
+        grams = set()
+        for seg in re.findall(r"[\u4e00-\u9fff]+", text):
+            if len(seg) == 1:
+                grams.add(seg)
+            for i in range(len(seg) - 1):
+                grams.add(seg[i : i + 2])
+        scores = []
+        for ln in lines:
+            score = 0
+            low = ln.lower()
+            for token in ascii_tokens:
+                if token in low:
+                    score += 3
+            if grams:
+                local = set()
+                for seg in re.findall(r"[\u4e00-\u9fff]+", ln):
+                    for i in range(len(seg) - 1):
+                        local.add(seg[i : i + 2])
+                score += 2 * len(grams & local)
+            scores.append(score)
+
+        try:
+            budget = max(200, int(max_chars))
+        except (TypeError, ValueError):
+            budget = 2000
+        soft = int(budget * 0.65)
+
+        picked: list[int] = []
+        used = 0
+        for idx in sorted(range(len(lines)), key=lambda i: scores[i], reverse=True):
+            if scores[idx] <= 0:
+                break
+            piece = f"- {lines[idx]}\n"
+            if used + len(piece) > soft:
+                continue
+            picked.append(idx)
+            used += len(piece)
+        chosen = set(picked)
+        for idx in range(len(lines)):
+            if idx in chosen:
+                continue
+            piece = f"- {lines[idx]}\n"
+            if used + len(piece) > budget:
+                break
+            picked.append(idx)
+            used += len(piece)
+        return "".join(f"- {lines[i]}\n" for i in picked).strip()
+
     def _load_memory(self) -> list[str]:
         try:
             path = self._memory_file()
@@ -2175,7 +2828,7 @@ class DcsWhosinPlugin(Star):
             max_items = int(self.config.get("ltm_max_items", 120) or 120)
         except (TypeError, ValueError):
             max_items = 120
-        max_items = max(20, min(max_items, 300))
+        max_items = max(20, min(max_items, 2000))
         logs = self._load_group_log()
         state = self._load_memory_state()
         last_ts = float(state.get("last_ts") or 0)
@@ -2350,6 +3003,12 @@ class DcsWhosinPlugin(Star):
         ttl = int(self.config.get("cache_ttl_seconds", 30) or 0)
         theme = str(self.config.get("image_theme", "cyberpunk-bw") or "cyberpunk-bw")
 
+        booking_now, booking_later = await self._get_site_bookings()
+        if booking_now or booking_later:
+            logger.info(
+                f"[dcs_whosin] 图片内嵌包场信息：进行中 {len(booking_now)} 条 / 稍后 {len(booking_later)} 条"
+            )
+
         payload = {
             "time_text": now.strftime("%Y-%m-%d %H:%M"),
             "weekday_text": "周" + "一二三四五六日"[now.weekday()],
@@ -2359,6 +3018,8 @@ class DcsWhosinPlugin(Star):
             "staff_count": len(staff_line),
             "total_count": len(players) + len(staff_line),
             "source_host": source_host,
+            "booking_now": booking_now,
+            "booking_later": booking_later,
         }
         return await self.renderer.render(
             payload,
@@ -2368,6 +3029,41 @@ class DcsWhosinPlugin(Star):
             browser_path=str(self.config.get("render_browser_path", "") or ""),
             timeout=float(self.config.get("render_timeout_seconds", 20) or 20),
         )
+
+    async def _get_site_bookings(self):
+        """读取站点包机/包场预告，带短缓存；失败时沿用上次结果。"""
+        if not bool(self.config.get("site_booking_enable", True)):
+            return [], []
+        now = time.monotonic()
+        ttl = max(30, int(self.config.get("site_booking_ttl_seconds", 120) or 120))
+        if self._site_bookings and now - self._site_bookings_at < ttl:
+            return pick_display(self._site_bookings)
+        if not self._site_bookings and now - self._site_bookings_at < 20:
+            return [], []
+
+        urls = self.config.get("target_urls", DEFAULT_TARGET_URLS)
+        if isinstance(urls, str):
+            urls = [urls]
+        html = None
+        try:
+            html = await fetch_booking_html(
+                list(urls or []),
+                int(self.config.get("timeout_seconds", 10) or 10),
+                str(self.config.get("cookie", "") or ""),
+                str(self.config.get("login_username", "") or ""),
+                str(self.config.get("login_password", "") or ""),
+            )
+        except Exception as exc:
+            logger.warning(f"[dcs_whosin] 包场预告抓取失败：{exc!r}")
+
+        if html:
+            rows = parse_booking_page(html)
+            if rows:
+                self._site_bookings = rows
+            self._site_bookings_at = now
+        elif not self._site_bookings:
+            self._site_bookings_at = now
+        return pick_display(self._site_bookings)
 
     def _presence_state_file(self) -> Path:
         return self.plugin_data_dir / "presence_state.json"
@@ -2466,42 +3162,127 @@ class DcsWhosinPlugin(Star):
 
         prefix = str(self.config.get("presence_prefix", "【Kanade】") or "")
         messages: list[str] = []
-        for user in entries:
-            key = visit_key(user.get("id"), user.get("entered_ms")) or user.get("key")
-            record = self._ledger_get(key)
-            if record.get("e"):
+        try:
+            confirm_s = max(0, int(self.config.get("presence_confirm_seconds", 45) or 0))
+        except (TypeError, ValueError):
+            confirm_s = 45
+        merge_s = max(0, int(self.config.get("presence_flap_merge_seconds", 180) or 0)) if not confirm_s else 0
+        pending = self._presence_pending
+        stale_ms = max(confirm_s, interval * 3) * 1000
+        flap_ms = max(confirm_s * 2, 90) * 1000
+
+        # 先处理上一轮的候选：进店要连续两轮都在，离店只要下一轮仍不在就算数。
+        for key, item in list(pending.items()):
+            kind = item.get("kind")
+            user = item.get("user") or {}
+            if kind == "e":
+                if key in current:
+                    record = self._ledger_get(key)
+                    back_ms = int(record.get("at") or 0)
+                    # 刚播过离店又马上回来：只补记录，不再刷一条进店。
+                    is_flap = bool(record.get("x")) and back_ms and (now_ms - back_ms) <= flap_ms
+                    record.pop("x", None)
+                    self._ledger_mark(key, e=1, at=user.get("entered_ms"))
+                    if not is_flap:
+                        messages.append(f"{prefix}{user.get('name', '')}进店了")
+                elif now_ms - int(item.get("since_ms") or now_ms) <= stale_ms:
+                    continue
+                pending.pop(key, None)
                 continue
-            messages.append(f"{prefix}{user.get('name', '')}进店了")
-            self._ledger_mark(key, e=1, at=user.get("entered_ms"))
+            if key in current:
+                pending.pop(key, None)
+                continue
+            text = await self._exit_message(user, now_ms, interval, prefix)
+            if text:
+                messages.append(text)
+            pending.pop(key, None)
+
+        if len(pending) > 300:
+            for key, _ in sorted(pending.items(), key=lambda kv: int(kv[1].get("since_ms") or 0))[:100]:
+                pending.pop(key, None)
+
+        for user in entries:
+            key = user.get("key") or ""
+            record = self._ledger_get(key)
+            if record.get("e") or key in pending:
+                continue
+            if confirm_s <= 0:
+                if merge_s and self._flap_recent(key, "x", merge_s):
+                    record.pop("x", None)
+                    self._ledger_mark(key, e=1, at=user.get("entered_ms"))
+                    self._flap_mark(key, "e")
+                    continue
+                messages.append(f"{prefix}{user.get('name', '')}进店了")
+                self._ledger_mark(key, e=1, at=user.get("entered_ms"))
+                self._flap_mark(key, "e")
+                continue
+            pending[key] = {"kind": "e", "since_ms": now_ms, "user": dict(user)}
         for user in exits:
-            entered_ms = user.get("entered_ms")
-            if not entered_ms:
+            if not user.get("entered_ms"):
                 logger.warning(f"[dcs_whosin] {user.get('name', '')} 离店但缺少入店时间，跳过播报")
                 continue
-            key = visit_key(user.get("id"), entered_ms) or user.get("key")
+            key = user.get("key") or ""
             record = self._ledger_get(key)
-            if record.get("x"):
+            if record.get("x") or key in pending:
                 continue
-            last_seen = int(user.get("last_seen_ms") or now_ms)
-            gap = max(0, now_ms - last_seen)
-            settle_ms = last_seen + min(gap, interval * 1000) // 2
-            minutes = max(0, math.ceil((settle_ms - int(entered_ms)) / 60000))
-            pricing = await self._get_pricing("")
-            try:
-                multiplier = float(user.get("multiplier")) if user.get("multiplier") is not None else 1.0
-            except (TypeError, ValueError):
-                multiplier = 1.0
-            fee_fen = calculate_charge_fen(int(entered_ms), settle_ms, pricing, multiplier)
-            messages.append(
-                f"{prefix}{user.get('name', '')}离店了\n"
-                f"游玩{minutes}分钟\n"
-                f"扣费{format_fee_yuan(fee_fen)}元（线上余额）"
-            )
-            self._ledger_mark(key, e=1, x=1, at=int(entered_ms))
+            if confirm_s <= 0:
+                if merge_s and self._flap_recent(key, "e", merge_s):
+                    self._flap_mark(key, "x")
+                    continue
+                text = await self._exit_message(user, now_ms, interval, prefix)
+                if text:
+                    messages.append(text)
+                continue
+            pending[key] = {"kind": "x", "since_ms": now_ms, "user": dict(user)}
 
         self._presence = current
         self._save_presence_state()
         await self._broadcast_presence(messages)
+
+    async def _exit_message(self, user: dict, now_ms: int, interval: int, prefix: str) -> str:
+        """结算并生成离店播报文案；生成后打上离店标记。"""
+        key = user.get("key") or ""
+        entered_ms = user.get("entered_ms")
+        if not entered_ms:
+            return ""
+        last_seen = int(user.get("last_seen_ms") or now_ms)
+        gap = max(0, now_ms - last_seen)
+        settle_ms = last_seen + min(gap, interval * 1000) // 2
+        minutes = max(0, math.ceil((settle_ms - int(entered_ms)) / 60000))
+        pricing = await self._get_pricing("")
+        try:
+            multiplier = float(user.get("multiplier")) if user.get("multiplier") is not None else 1.0
+        except (TypeError, ValueError):
+            multiplier = 1.0
+        fee_fen = calculate_charge_fen(int(entered_ms), settle_ms, pricing, multiplier)
+        # e 清零：等这人真再进店时还能正常播进店
+        self._ledger_mark(key, e=0, x=1, at=int(entered_ms))
+        return (
+            f"{prefix}{user.get('name', '')}离店了\n"
+            f"游玩{minutes}分钟\n"
+            f"扣费{format_fee_yuan(fee_fen)}元（线上余额）"
+        )
+
+    def _flap_recent(self, key: str, kind: str, window_s: int) -> bool:
+        if not key:
+            return False
+        item = self._flap.get(key)
+        if not item:
+            return False
+        last_kind, last_at = item
+        if last_kind != kind:
+            return False
+        return (time.monotonic() - last_at) <= window_s
+
+    def _flap_mark(self, key: str, kind: str) -> None:
+        if not key:
+            return
+        now = time.monotonic()
+        self._flap[key] = (kind, now)
+        if len(self._flap) > 400:
+            for k, (_, ts) in list(self._flap.items()):
+                if now - ts > 3600:
+                    self._flap.pop(k, None)
 
     def _ledger_seen(self) -> dict:
         if self._records_state is None:
@@ -2546,15 +3327,28 @@ class DcsWhosinPlugin(Star):
         gap = float(self.config.get("presence_min_gap_seconds", 2) or 0)
         for text in messages:
             for target in targets:
-                try:
-                    ok = await self.context.send_message(target, MessageChain([Plain(text)]))
-                    if not ok:
+                sent = False
+                failed = False
+                last_error = None
+                for attempt in range(3):
+                    try:
+                        ok = await self.context.send_message(target, MessageChain([Plain(text)]))
+                        if ok:
+                            sent = True
+                            break
                         logger.warning(f"[dcs_whosin] 进离店播报目标不存在：{target}")
-                except Exception as exc:
-                    logger.warning(f"[dcs_whosin] 进离店播报失败（{target}）：{exc!r}")
+                        break
+                    except Exception as exc:
+                        last_error = exc
+                        await asyncio.sleep(1.5 * (attempt + 1))
+                if not sent:
+                    failed = True
+                if not sent and last_error is not None:
+                    logger.warning(f"[dcs_whosin] 进离店播报失败（{target}）：{last_error!r}")
             logger.info(f"[dcs_whosin] 进离店播报：{text}")
-            if gap > 0:
-                await asyncio.sleep(gap)
+            wait = gap if not failed else max(gap, 4.0)
+            if wait > 0:
+                await asyncio.sleep(wait)
 
     async def _get_pricing(self, source_url: str) -> dict:
         now = time.monotonic()
@@ -2767,7 +3561,7 @@ class DcsWhosinPlugin(Star):
         }
 
     async def terminate(self):
-        for task in (self._status_task, self._deps_task, self._presence_task, self._mj_task, self._ltm_task, self._aquiz_task):
+        for task in (self._status_task, self._deps_task, self._presence_task, self._mj_task, self._ltm_task, self._aquiz_task, self._aquiz_history_task, self._image_cleanup_task):
             if task and not task.done():
                 task.cancel()
         await self.renderer.close()

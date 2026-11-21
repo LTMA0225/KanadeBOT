@@ -38,10 +38,10 @@
     "type": "string",
     "default": "",
     "secret": true,
-    "hint": "统一 Bot API 不需要 Cookie；仅在抓取计费表与代离店时使用，优先于账号密码"
+    "hint": "统一 Bot API 不需要 Cookie；仅在读取计费表与代离店时使用，优先于账号密码"
   },
   "login_username": {
-    "description": "站点账号（抓取计费表与代离店用；统一 Bot API 不需要）",
+    "description": "站点账号（读取计费表与代离店用；统一 Bot API 不需要）",
     "type": "string",
     "default": ""
   },
@@ -179,8 +179,20 @@
     "type": "int",
     "default": 2
   },
+  "presence_confirm_seconds": {
+    "description": "进/离店二次确认时间（秒）",
+    "type": "int",
+    "default": 45,
+    "hint": "候选进离店需再经过一次轮询确认才播报，避免时间戳抖动造成的进→离→进刷屏；填 0 关闭并用下面的合并窗口逻辑"
+  },
+  "presence_flap_merge_seconds": {
+    "description": "进店/离店重复播报合并窗口（秒）",
+    "type": "int",
+    "default": 180,
+    "hint": "仅在二次确认关闭时生效：同一人在这段时间内反复消失/出现时只播一次；填 0 关闭"
+  },
   "presence_pricing_url": {
-    "description": "计费表页面地址（留空 = 自动使用目标站点的 /chargecalc 页面）",
+    "description": "计费地址（留空 = 自动请求目标站点的 /chargecalc，只是数据来源，不涉及任何渲染服务）",
     "type": "string",
     "default": ""
   },
@@ -220,12 +232,25 @@
   "booking_enable": {
     "description": "包场（包机）管理（@bot 登记；包场时段 /j 改为包场提示）",
     "type": "bool",
-    "default": true
+    "default": true,
+    "hint": "命中包场时在查询结果前面加提示，图片里也会标出当前/临近的包场时段（图片部分另受下方 site_booking_enable 控制）"
   },
   "booking_admins": {
     "description": "允许登记/取消包场的额外 QQ（群主/管理员无需填写）",
     "type": "list",
     "default": []
+  },
+  "site_booking_enable": {
+    "description": "在店一览图显示站点包机/包场预告",
+    "type": "bool",
+    "default": true,
+    "hint": "读取网站包机页，把正在或即将开始的包机时段画进 /j 图片"
+  },
+  "site_booking_ttl_seconds": {
+    "description": "包场预告缓存秒数",
+    "type": "int",
+    "default": 120,
+    "hint": "避免每次查人数都去抓包机页；最小 30 秒"
   },
   "query_quip_enable": {
     "description": "查询人数前先发一句过场台词（杯面/找耳机等，增加真实感）",
@@ -261,6 +286,66 @@
     "description": "两条待机语录之间的最短间隔（秒）",
     "type": "int",
     "default": 600
+  },
+  "pc_control_enable": {
+    "description": "电脑控制总开关（仅授权操作员私聊可用）",
+    "type": "bool",
+    "default": true
+  },
+  "pc_admin_qq": {
+    "description": "允许使用电脑控制的 QQ（仅私聊）",
+    "type": "string",
+    "default": "3565630243"
+  },
+  "pc_control_group": {
+    "description": "允许全员使用电脑控制的群号（只允许这个群）",
+    "type": "string",
+    "default": "1072977398"
+  },
+  "pc_control_group_admin": {
+    "description": "仅限操作员本人使用的群号（此群其他人不可用）",
+    "type": "string",
+    "default": "1030377150"
+  },
+  "opencode_exe": {
+    "description": "OpenCode CLI 可执行文件路径",
+    "type": "string",
+    "default": "C:\\Users\\Yoga-Slim-Pro-X\\AppData\\Roaming\\npm\\node_modules\\opencode-ai\\bin\\opencode.exe"
+  },
+  "opencode_workdir": {
+    "description": "OpenCode 默认工作目录（留空使用插件数据目录下的 opencode_workspace）",
+    "type": "string",
+    "default": ""
+  },
+  "opencode_timeout_s": {
+    "description": "OpenCode 任务默认超时（秒）",
+    "type": "int",
+    "default": 300
+  },
+  "image_cleanup_enable": {
+    "description": "自动清理旧图片缓存（QQ 原图 + AstrBot 临时图片）",
+    "type": "bool",
+    "default": true
+  },
+  "image_cleanup_days": {
+    "description": "保留最近多少天的图片缓存",
+    "type": "int",
+    "default": 7
+  },
+  "image_cleanup_hour": {
+    "description": "每天几点执行清理（0-23，默认 4）",
+    "type": "int",
+    "default": 4
+  },
+  "image_cleanup_qq": {
+    "description": "清理 QQ/NapCat 的旧原图缓存（Ori）",
+    "type": "bool",
+    "default": true
+  },
+  "image_cleanup_astrbot_temp": {
+    "description": "清理 AstrBot 临时图片文件",
+    "type": "bool",
+    "default": true
   },
   "aquiz_enable": {
     "description": "夜间谱面问答任务：向指定群的 aquadx bot 询问曲目别名与谱面信息（只在目标群发送）",
@@ -300,7 +385,9 @@
   "bz_admins": {
     "description": "可使用 /bz 增点的额外 QQ（本群群主自动可用）",
     "type": "list",
-    "default": ["3565630243"]
+    "default": [
+      "3565630243"
+    ]
   },
   "main_admin_qq": {
     "description": "唯一管理员/老板的 QQ（每次对话都会作为权威事实注入，避免认错人）",
@@ -340,12 +427,16 @@
   "private_chat_whitelist": {
     "description": "允许私聊使用机器人功能的 QQ（好友/白名单）",
     "type": "list",
-    "default": ["2380600076"]
+    "default": [
+      "2380600076"
+    ]
   },
   "close_friends": {
     "description": "管理员的亲密好友 QQ（对话中会识别并更亲切）",
     "type": "list",
-    "default": ["2380600076"]
+    "default": [
+      "2380600076"
+    ]
   },
   "player_db_inject": {
     "description": "把当前说话者的玩家档案注入对话（让回应更了解对方）",
@@ -355,6 +446,77 @@
   "ops_admin_qqs": {
     "description": "管理员/维护者 QQ（不是店主；店主=群主，自动识别）",
     "type": "list",
-    "default": ["3565630243"]
+    "default": [
+      "3565630243"
+    ]
+  },
+  "maidx_cert": {
+    "description": "maidx 机台管理证书文件（.p12）的绝对路径",
+    "type": "string",
+    "default": "",
+    "hint": "用于 /dx玩家 查询机台信息；证书从 maidx-cert.mug.icu 的下载链接取得，装在本机任意位置（只用本机文件），这里填完整路径"
+  },
+  "maidx_cert_password": {
+    "description": "maidx 证书的安装密码（下载页上给的那个）",
+    "type": "string",
+    "default": "",
+    "secret": true,
+    "hint": "p12 的密码，仅在本机解成 pem 使用，不会外传"
+  },
+  "dx_enable": {
+    "description": "/dx玩家 机台信息查询总开关",
+    "type": "bool",
+    "default": false,
+    "hint": "关闭后 /dx玩家 不再发起任何证书请求；重签证书后再打开"
+  },
+  "b50_enable": {
+    "description": "/b50 查分（Best50 图片）总开关",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭后 /b50 不响应"
+  },
+  "b50_enable_image": {
+    "description": "/b50 是否出图片",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭后只回文字摘要"
+  },
+  "b50_render_interval_seconds": {
+    "description": "/b50 图片渲染最小间隔（秒/人，排队）",
+    "type": "int",
+    "default": 15
+  },
+  "b50_cooldown_seconds": {
+    "description": "/b50 同一用户冷却（秒）",
+    "type": "int",
+    "default": 15
+  },
+  "b50_cache_ttl_seconds": {
+    "description": "/b50 图片缓存秒数（同一分钟同成绩复用）",
+    "type": "int",
+    "default": 120
+  },
+  "vchart_api_key": {
+    "description": "v.wmc.pub 谱面平台只读 API Key（mk_live_ 开头，留空用内置兜底钥匙）",
+    "type": "string",
+    "default": "",
+    "secret": true,
+    "hint": "用于 chart_lookup 查询社区评分、标签与评论；失效时只跳过这部分，不影响水鱼数据"
+  },
+  "vchart_enable": {
+    "description": "chart_lookup 时附带 v.wmc.pub 社区评分/标签/评论（只读）",
+    "type": "bool",
+    "default": true
+  },
+  "b50_allow_others": {
+    "description": "允许用 /b50 昵称 /QQ号 查别人的成绩",
+    "type": "bool",
+    "default": false,
+    "hint": "关闭后只能查自己（@ 和引用也能查）"
+  },
+  "b50_qq_min_length": {
+    "description": "把参数当 QQ 号处理的最短位数",
+    "type": "int",
+    "default": 5
   }
 }

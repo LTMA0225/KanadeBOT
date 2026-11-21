@@ -14,16 +14,17 @@ description: 查询“音游窝”店内实时在店人员名单（玩家 / 管�
 
 ## 数据来源
 
-- 抓取 `https://dcstream.top/whosin`（需要登录，账号密码与 Cookie 只经 HTTPS 发送）。
-- 域名访问失败时直连备用 IP `47.116.47.191`，但证书仍按域名校验，不会降级为明文 HTTP。
-- 页面昵称元素的 class 含独立的 `nickname` 词元，附加词元表示角色：
+- 统一 Bot API：站点同一地址下的 `POST /api/botAction`，动作为 `getPresentUsers`，明钥鉴权、按 action 授权。
+- 返回结构直接给出昵称与角色（`role`），不再解析页面 HTML：
 
-| class | 角色 |
-|-------|------|
-| `nickname` | 玩家 |
-| `nickname sponsor` | 赞助者（计入玩家） |
-| `nickname staff` | 士大夫（工作人员） |
-| `nickname admin` | 管理员 |
+| role | 角色 |
+|------|------|
+| `CUSTOMER` | 玩家 |
+| `HELPER` | 士大夫（工作人员） |
+| `ADMIN` | 管理员 |
+
+- 域名访问失败时可直连备用 IP，但证书仍按域名校验，不会降级为明文 HTTP。
+- 图片完全在本机渲染：Jinja2 模板 + 本机浏览器内核（Windows 用系统 Edge）截图，素材只用 `assets/` 里的本地文件。
 
 ## 输出规则
 
@@ -33,16 +34,16 @@ description: 查询“音游窝”店内实时在店人员名单（玩家 / 管�
 2. 玩家数量大于 0 时，发送「文本 + 图片」：
    - 文本第一行：`玩家：昵称1,昵称2`（英文逗号分隔）；
    - 文本第二行（存在管理 / STAFF 时）：`管理/STAFF：昵称1,昵称2`。
-   - 图片：音游窝 Logo、当前时间（UTC+8）、分类人员列表；在本机渲染，不经过第三方服务。
+   - 图片：宵崎奏主题卡片（站酷快乐体），玩家每人一框（昵称 / 入店时间 / 游玩分钟），管理与 STAFF 单独一栏；在本机渲染，不经过任何外部渲染服务。
 
 ## 异常处理
 
-- 网络失败、登录失败或页面结构变化：群内只回复通用提示（如 `查询失败：站点暂时无法访问，请稍后再试。`），
+- 网络失败、明钥无效、权限不足或返回结构异常：群内只回复通用提示（如 `查询失败：站点暂时无法访问，请稍后再试。`），
   不暴露地址或异常细节；详细原因写入日志。
 - 图片渲染失败或超时：改发文字版，并附「图片渲染暂时失败」提示。
 
 ## 可用配置项（WebUI 插件配置页）
 
-`target_urls`、`fallback_ips`、`timeout_seconds`、`cookie`、`login_username`、`login_password`、
+`bot_api_key`、`bot_qqid`、`target_urls`、`fallback_ips`、`timeout_seconds`、`cookie`、`login_username`、`login_password`、
 `enable_image`、`cache_ttl_seconds`、`image_theme`、`render_browser`、`render_browser_path`、
 `render_timeout_seconds`、`cooldown_seconds`、`group_interval_seconds`、`allowed_groups`

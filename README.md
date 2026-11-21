@@ -1,4 +1,4 @@
-# 音游窝 QQ 机器人（AstrBot 插件）v3.9.3
+# 音游窝 QQ 机器人（AstrBot 插件）v3.17.0
 
 > ⚠️ **使用声明**：本机器人仅供「音游窝」店内群内部使用。
 > 本项目未获得任何其他组织、公司或个人的授权、许可或背书，亦与其不存在任何关联。
@@ -6,16 +6,31 @@
 > 仓库：KanadeBOT · 群昵称：宵崎奏bot
 >
 > 基于 **AstrBot + NapCat** 的 QQ 群服务机器人：实时在店查询、进/离店自动播报、
-> @bot 自助离店、QQ 绑定、时段价格查询、收藏表情……覆盖音游店日常运营的完整工具链。
+> @bot 自助离店、QQ 绑定、时段价格查询、收藏表情、B50 查分、机台查询……
+> 覆盖音游店日常运营的完整工具链。
 
-- 机器人框架：AstrBot ≥ 4.13（生产环境使用 4.28.1 桌面版）
-- QQ 协议端：NapCat（OneBot v11，反向 WebSocket）
-- 开发语言：Python 3.10+
-- 数据接口：**站点统一 Bot API**（`POST /api/botAction`，明钥鉴权、按 action 授权）
-- 配套网页端：[MioAoi/dcs-web](https://github.com/MioAoi/dcs-web)（音游窝网站，本机器人对接的业务系统）
+## 运行方式（全部在本机）
+
+整套机器人**全部跑在一台本机（Windows 桌面）上**：取数、渲染、缓存、解析、日志都不出本机，图片不经过任何第三方渲染站：
+
+- 机器人框架：AstrBot 桌面版（≥ 4.13，当前生产环境 4.28.1），插件跑在同一个进程里；
+- QQ 协议端：NapCat（OneBot v11，反向 WebSocket，只连 `127.0.0.1`）；
+- 数据：站点统一 Bot API（`POST /api/botAction`，明钥鉴权、按 action 授权）；
 - 图片：**本机渲染**——Jinja2 生成 HTML，Playwright 驱动本机浏览器内核截图
-  （Windows 默认用系统自带的 Edge）；风格为**宵崎奏主题 + 萌感字体（站酷快乐体）**，
-  不调用任何第三方或社区渲染服务
+  （Windows 直接使用系统自带的 Edge），风格为**宵崎奏主题 + 萌感字体（站酷快乐体）**；
+- 谱面与资料数据：水鱼查分器曲库（本地缓存 24 小时）+ 各 WIKI / 官网正文由本机抓取并解析；
+- B50 渲染、封面缓存、成绩图片全部在本机生成并缓存在 AstrBot 的插件数据目录；
+- 机台查询（`/dx玩家`）使用本机保存的 maidx 证书（`.p12`）直连，证书只在本地解密；
+- 电脑控制（shell / Python / OpenCode）同样是本机执行，只有授权操作员能触发。
+
+换句话说：**装好本机就能全功能跑完，不需要服务器、不需要 Docker、不需要任何外部渲染站。**
+
+运行环境一览：
+
+- 机器人框架：AstrBot 桌面版 ≥ 4.13（生产环境 4.28.1）
+- QQ 协议端：NapCat（OneBot v11，反向 WebSocket，本机回环）
+- 开发语言：Python 3.10+
+- 配套网页端：[MioAoi/dcs-web](https://github.com/MioAoi/dcs-web)（音游窝网站，本机器人对接的业务系统）
 
 ## 功能总览
 
@@ -28,16 +43,23 @@
 | `mjlist` | 列出 bot 收藏的表情（编号 + 图片），用于确定 `mj_sticker_index` | 一次性设置用 |
 | `bd`（默认 `/bd 验证码`） | QQ 绑定：把网站「个人信息」页的绑定验证码发到群里，机器人自动完成 QQ 绑定 | 每人 15 秒冷却 |
 | `离店` | `@机器人 离店`：按 QQ 绑定自动离店结算（也支持 `/离店`）；**不支持机器人进店**（进店请在网站操作） | 每人 30 秒冷却 |
-| 包场/包机 | `@机器人 包场 舞萌 10日14时~16时`：登记包场（群主/管理员）；包场时段群内 `/j` 只提示包场 | —— |
-| 取消包场 | `@机器人 取消包场 [机台关键词]`：撤销包场登记（不带关键词=全部） | —— |
+| `包场/包机` | `@机器人 包场 舞萌 10日14时~16时`：登记包场（群主/管理员）；包场时段群内 `/j` 只提示包场 | —— |
+| `取消包场` | `@机器人 取消包场 [机台关键词]`：撤销包场登记（不带关键词=全部） | —— |
+| `b50`（默认 `/b50`） | 本机渲染 Best50 成绩图（水鱼查分器数据 + 本地封面缓存）；可带昵称 / QQ / @ / 引用查别人 | 每人 15 秒冷却；渲染排队 |
+| `dx玩家`（默认 `/dx玩家`） | 用本机 maidx 证书查询机台在线人数（仅操作员私聊与指定群） | —— |
+| `/bz QQ号 点数` | 为指定客户增点并显示余额（`bz_admins` 与群主可用） | —— |
+| `/memory`、`/players` | 查看长期记忆 / 玩家档案；`/memory now` 立即汇总 | 管理员 |
+| `/imgclean [now]` | 查看或立即执行图片缓存清理 | 管理员 |
 | 过场台词 | `/j` 查询前会先说一句「等我吃完这口杯面帮你查哦…」等台词再出结果（台词池与停顿可配置） | —— |
-| 联网搜索 | 需要最新信息（新闻、活动、价格、更新等）时自动调用 DeepSeek 联网搜索（按次计费，无需额外 Key） | —— |
-| 萌娘百科 | 问到角色设定、作品背景、剧情或梗时自动查萌娘百科词条（搜索 + 抓取正文，无需额外 Key） | —— |
+| 待机语录 | 小奏本来只想发「……」时，按概率换成一句待机台词（可自定义/关闭） | 20% + 10 分钟冷却 |
+| 联网搜索 | 需要最新信息（新闻、活动、价格、更新等）时自动联网搜索（按次计费） | —— |
+| 萌娘百科 | 问到角色设定、作品背景、剧情或梗时自动查萌娘百科词条（搜索 + 本机解析正文） | —— |
 | 音游资料 | CHUNITHM/中二节奏、maimai/舞萌DX 的角色与曲目资料：自动查对应 WIKI 与官网并抓正文 | —— |
-| 谱面查询 | 难度、定数、物量、谱师：水鱼查分器曲库（本地缓存 24 小时） | —— |
-| 增点（/bz） | `@机器人 /bz QQ号 点数`：为指定客户增点并显示余额（`bz_admins` 与群主可用） | —— |
-| 长期记忆 | 自动记录群聊，每 12 小时蒸馏一次（群规/常识/黑话/成员称呼），每次对话注入；`/memory` 查看、`/memory now` 立即汇总（管理员） | —— |
-| 玩家档案库 | 260 位群友的称呼/身份/常聊话题/性格画像（`players.json`）；`player_lookup` 工具按需查询，当前说话者档案自动注入；`/players [关键词]` 查看（管理员） | —— |
+| 谱面查询 | 难度、定数、物量、谱师：水鱼查分器曲库（本地缓存 24 小时），可附 v.wmc.pub 社区评分/标签 | —— |
+| 夜间谱面问答 | 向指定群的 aquadx bot 逐条提问「XXX是什么歌？」，收集回复后在本机生成报告 | 夜间窗口内限速 |
+| 长期记忆 | 自动记录群聊，每 12 小时在本机蒸馏一次（群规/常识/黑话），每次对话注入 | —— |
+| 玩家档案库 | 群友的称呼/身份/常聊话题/性格画像（`players.json`）；`player_lookup` 按需查询，当前说话者档案自动注入 | —— |
+| 电脑控制 | 授权操作员私聊可用本机 shell / Python / OpenCode；执行日志写在本机审计文件 | —— |
 | （自动） | **进 / 离店播报**：玩家进出自动发到群里（离店含时长与扣费） | 见配置 |
 
 图片与文本内容：
@@ -50,7 +72,7 @@
 
 - **玩家数量为 0**（只有管理员 / 士大夫，或完全无人）时，回复固定文案：`店内无玩家，快来吧唧！`；
 - 接口失败时只在群里给出通用提示（如「查询失败：站点暂时无法访问，请稍后再试。」），
-  不暴露地址、明钥或异常细节；详细原因写入 AstrBot 日志，并通过状态推送告知维护者；
+  不暴露地址、明钥或异常细节；详细原因写入本机日志，并通过状态推送告知维护者；
 - 图片渲染失败或超时时降级为文字版，插件不会崩溃。
 
 ## 统一 Bot API（数据来源）
@@ -127,6 +149,7 @@ Content-Type: application/json
   （期间不提供在店人数查询）
   ```
 
+- 另外开启 `site_booking_enable` 后，图片里也会画出站点包机页上正在或即将开始的时段；
 - 误登记可撤销：`@机器人 取消包场`（全部）或 `@机器人 取消包场 舞萌`（按机台关键词）；
 - 只允许群主 / 管理员操作；记录持久化保存，结束后自动过期清理。
 
@@ -153,6 +176,27 @@ Content-Type: application/json
 - `/mj`：发送 bot 账号收藏的表情包（自动读取 NapCat 收藏、下载到本地缓存，链接过期也不影响）；
 - `/mjlist`：列出收藏表情与编号，用配置 `mj_sticker_index` 选择发送第几个。
 
+## B50 查分（/b50）
+
+- 数据取自水鱼查分器 API，封面第一次用到时下载到本机 `b50_covers` 并长期复用；
+- 成绩图同样由本机 Playwright 渲染，同一份成绩在缓存时间内直接复用图片；
+- 默认 15 秒冷却、每人一次渲染排队（`b50_render_interval_seconds`），避免把本机渲染打满；
+- `b50_allow_others` 可放开查别人的成绩（@ / 引用 / 昵称 / QQ 号），`b50_qq_min_length` 控制位数判定；
+- 关掉 `b50_enable_image` 就只回文字摘要。
+
+## 机台查询（/dx玩家）
+
+- 用本机安装好的 maidx 证书（配置 `maidx_cert` 指向 `.p12` 绝对路径 + `maidx_cert_password`）直连查询；
+- 证书只在本机解密成临时 pem，不外传；
+- 只在操作员私聊与 `pc_control_group` 指定的群里响应，`dx_enable` 为总开关。
+
+## 夜间谱面问答（aquiz）
+
+- 只在 `aquiz_group` 指定群里运行、只在该群发言，其他群不受打扰；
+- 在 `aquiz_start`~`aquiz_end` 时间窗内逐条向 aquadx bot 提问「XXX是什么歌？」；
+- 收到回复后解析定数、物量等信息，结果、调试日志与报告都写在本机插件数据目录；
+- 每条之间有最小间隔（`aquiz_interval_s`），首条无回复立即停止，避免刷屏。
+
 ## 安全设计
 
 | 方面 | 做法 |
@@ -163,81 +207,67 @@ Content-Type: application/json
 | 重定向 | 手动跟随，只跟随同站点跳转，Cookie 不会被带到其他站点 |
 | 图片渲染 | 模板自动转义 + 用户字段显式 `\|e`；页面禁用 JavaScript；拦截一切网络请求，只放行 `assets/` 下的本地素材 |
 | 群锁 | 三层：AstrBot 白名单（`id_whitelist`）→ aiocqhttp 适配器补丁（群号 + 机器人号）→ 插件 `allowed_groups` |
-| 账号保护 | 适配器补丁只接受机器人号的事件；控制台发现登录的不是机器人号会自动停下 |
+| 账号保护 | 适配器补丁只接受机器人号的事件；适配器补丁发现登录的不是机器人号会自动停下 |
 | 自助操作 | 离店 / 绑定只使用发送者自己的 QQ；冷却限频；只影响本人账号 |
 | 管理接口 | AstrBot 面板与 NapCat WebUI 只监听 `127.0.0.1` |
-| 密码保存 | 迁移包不含密码：面板密码由控制台用 Windows DPAPI 加密保存在本机；站点密码在部署时输入；NapCat 令牌在部署时重新生成 |
+| 密码保存 | 面板密码用 Windows DPAPI 加密保存在本机；站点密码在部署时输入；NapCat 令牌在部署时重新生成 |
 | 状态推送 | 默认只在启动、站点异常 / 恢复时推送，外加每日心跳，降低协议号风控风险 |
+| 电脑控制 | 白名单 QQ / 群 + 本机审计日志（`pc_audit.jsonl`）；执行前有超时上限 |
 
 ## 目录结构
 
 ```
 astrbot_plugin_dcs_whosin/
-├── main.py                   插件入口（指令、静默策略、状态推送、依赖补装）
-├── dcs_botapi.py             统一 Bot API 客户端（明钥鉴权、数据解析）
+├── main.py                   插件入口（指令、工具、静默策略、状态推送、依赖补装）
 ├── dcs_api.py                站点会话与线路辅助（登录缓存、HTTPS/备用 IP）
-├── dcs_render.py             本机图片渲染与缓存（Jinja2 + Playwright，独立线程）
+├── dcs_botapi.py             统一 Bot API 客户端（明钥鉴权、数据解析）
 ├── dcs_presence.py           进/离店播报与计费（差分、计费复刻、时段价格文案）
 ├── dcs_attend.py             @bot 自助离店（工作人员代离店 + 真实扣费读取）
 ├── dcs_bind.py               /bd QQ 绑定（验证码提交与结果文案）
 ├── dcs_mj.py                 /mj 收藏表情（收藏读取 + 本地缓存）
-├── templates/whosin.html     图片模板（HTML + CSS + Jinja2）
+├── dcs_booking.py            包场（包机）登记与持久化
+├── dcs_sitebooking.py        站点包机页读取（图片内嵌预告）
+├── dcs_maidx.py              /dx玩家 机台在线查询（本机证书）
+├── dcs_b50.py                /b50 查分（水鱼接口 + 本地封面缓存）
+├── dcs_websearch.py          联网搜索与网页取文（多引擎回退）
+├── dcs_vchart.py             v.wmc.pub 谱面只读客户端（社区评分/标签/评论）
+├── dcs_render.py             本机图片渲染与缓存（Jinja2 + Playwright，独立线程）
+├── templates/whosin.html     在店一览图片模板（HTML + CSS + Jinja2）
+├── templates/b50.html        B50 成绩图模板
 ├── assets/                   本地素材：bg.jpg（宵崎奏）、logo.svg、fonts/（站酷快乐体，SIL OFL）
 ├── skills/                   随插件提供的 Skills（whosin-query、25h）
 ├── metadata.yaml             插件元数据
 ├── _conf_schema.json         可视化配置定义（WebUI 插件配置页）
-├── requirements.txt          依赖清单（aiohttp、jinja2、playwright）
-└── deploy/                   Linux 一键脚本与 Docker 编排
-    ├── linux_install.sh
-    ├── docker-compose.yml
-    └── Dockerfile.astrbot
+├── requirements.txt          依赖清单（aiohttp、jinja2、playwright、cryptography）
+└── deploy/                   仅作备选参考（Linux / Docker 想搬服务器时再看看）
 ```
 
-Windows 运维脚本（一键部署、控制台、看门狗、适配器补丁）在迁移包的「控制台\DCS机器人开关」目录。
+运行时产生的所有数据（图片缓存、`b50_covers`、`players.json`、`bookings.json`、记忆文件、
+`pc_audit.jsonl` 等）都在 AstrBot 的 `data/plugin_data/astrbot_plugin_dcs_whosin` 下，
+插件目录本身可以只读。
 
-## 部署
+## 部署（本机 Windows 桌面）
 
-### 方式 A：Windows 迁移包（推荐，当前生产环境）
-
-按迁移包根目录「0.迁移指南（先看我）.txt」操作：安装 QQ 与 AstrBot → 双击「1.一键部署」→
-桌面「DCS机器人开关」选 [1] 上线。一键部署会把 NapCat 与控制台装到 `%LOCALAPPDATA%\DCSBot`，
-并完成插件复制、AstrBot 补丁、看门狗计划任务与桌面快捷方式。
-
-### 方式 B：Linux / macOS 一键脚本
-
-```bash
-chmod +x deploy/linux_install.sh
-./deploy/linux_install.sh
-```
-
-### 方式 C：Docker Compose（服务器）
-
-```bash
-cd deploy
-docker compose up -d --build
-```
-
-- 管理面板 `6185`、NapCat WebUI `6099` 只绑定宿主机 `127.0.0.1`，远程管理请用 SSH 隧道；
-- `6199` 只在容器网络内开放，NapCat 反向 WS 填 `ws://astrbot:6199/ws`；
-- `Dockerfile.astrbot` 在官方镜像上加装 Playwright Chromium 与中日文字体（插件配置 `render_browser` 选 `chromium`）。
-
-### 方式 D：手动部署（桌面客户端）
-
-1. 安装 [AstrBot 桌面客户端](https://github.com/AstrBotDevs/AstrBot-desktop/releases)；
-2. 将本插件文件夹复制到 AstrBot 数据目录的 `data/plugins/` 下；
+1. 安装 QQ 与 [AstrBot 桌面客户端](https://github.com/AstrBotDevs/AstrBot-desktop/releases)；
+2. 把本插件文件夹复制到 AstrBot 数据目录的 `data/plugins/` 下；
 3. 在 AstrBot WebUI「插件」页确认 `astrbot_plugin_dcs_whosin` 已加载并启用；
-4. 在插件配置中填写 **Bot 明钥**（`bot_api_key`）与机器人 QQ（`bot_qqid`）；
-5. 插件首次启动会用 AstrBot 自带的 pip 安装器在后台补装 jinja2 / playwright（装好前只发文字版）。
+4. 在插件配置里填 **Bot 明钥**（`bot_api_key`）与机器人 QQ（`bot_qqid`），按需填群号白名单；
+5. 插件首次启动会用 AstrBot 自带的 pip 安装器在本机补装 jinja2 / playwright（装好前只发文字版）；
+6. 需要 B50 / 机台查询时，再补 `b50_*`、`maidx_*` 相关配置；
+7. 群内发送 `/j` 测试。
 
-## NapCat 对接（手动部署时）
+全部步骤都在本机完成，不需要服务器；`deploy/` 下只剩可选的容器编排与 Linux 脚本，
+本机桌面按上面步骤手动装好即可。
+
+## NapCat 对接
 
 1. 安装并启动 NapCat（[下载地址](https://github.com/NapNeko/NapCatQQ/releases)），登录机器人 QQ；
-   建议把 NapCat `config/webui.json` 的 `host` 设为 `127.0.0.1`；
+   把 NapCat `config/webui.json` 的 `host` 设为 `127.0.0.1`；
 2. NapCat WebUI：**网络配置 → 新建 → WebSocket 反向**，URL 填 `ws://127.0.0.1:6199/ws`；
 3. AstrBot WebUI：**消息平台 → 新增 → aiocqhttp（OneBot v11）**，反向 WS 端口 `6199`；
 4. 群内发送 `/j` 测试。
 
-## 配置项（WebUI 插件配置页）
+## 配置项（本机 WebUI 插件配置页）
 
 | 配置 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -247,7 +277,7 @@ docker compose up -d --build
 | `fallback_ips` | list | `["47.116.47.191"]` | 域名访问失败时直连的备用 IP（证书仍按域名校验） |
 | `timeout_seconds` | int | `10` | 单次请求超时（秒） |
 | `cookie` | string（密文） | 空 | 站点 Cookie（计费表/来店记录页需要登录时使用） |
-| `login_username` | string | 空 | 站点账号（抓取计费表与代离店用） |
+| `login_username` | string | 空 | 站点账号（读取计费表与代离店用） |
 | `login_password` | string（密文） | 空 | 站点密码（自动登录用，会话失效自动重新登录） |
 | `enable_image` | bool | `true` | 是否发送渲染图片（关闭后只发文本） |
 | `cache_ttl_seconds` | int | `30` | 图片缓存时间（秒，0 = 不缓存） |
@@ -292,7 +322,47 @@ docker compose up -d --build
 | `private_chat_whitelist` | list | `["2380600076"]` | 允许私聊使用机器人功能的 QQ（好友白名单） |
 | `close_friends` | list | `["2380600076"]` | 管理员的亲密好友 QQ（对话中会识别并更亲切） |
 | `player_db_inject` | bool | `true` | 把当前说话者的玩家档案注入对话 |
-
+| `site_booking_enable` | bool | `true` | 在店一览图显示站点包机/包场预告 |
+| `site_booking_ttl_seconds` | int | `120` | 包场预告缓存秒数 |
+| `idle_quip_enable` | bool | `true` | 小奏只想发“……”时，偶尔换成一句待机语录（其余情况静默不发） |
+| `idle_quip_lines` | list | `[]` | 自定义待机语录（留空使用内置语录池） |
+| `idle_quip_rate` | int | `20` | 待机语录发送概率（%），其余情况静默不发送 |
+| `idle_quip_cooldown_s` | int | `600` | 两条待机语录之间的最短间隔（秒） |
+| `pc_control_enable` | bool | `true` | 电脑控制总开关（仅授权操作员私聊可用） |
+| `pc_admin_qq` | string | `3565630243` | 允许使用电脑控制的 QQ（仅私聊） |
+| `pc_control_group` | string | `1072977398` | 允许全员使用电脑控制的群号（只允许这个群） |
+| `pc_control_group_admin` | string | `1030377150` | 仅限操作员本人使用的群号（此群其他人不可用） |
+| `opencode_exe` | string | `C:\Users\Yoga-Slim-Pro-X\AppData\Roaming\npm\node_modules\opencode-ai\bin\opencode.exe` | OpenCode CLI 可执行文件路径 |
+| `opencode_workdir` | string | 空 | OpenCode 默认工作目录（留空使用插件数据目录下的 opencode_workspace） |
+| `opencode_timeout_s` | int | `300` | OpenCode 任务默认超时（秒） |
+| `image_cleanup_enable` | bool | `true` | 自动清理旧图片缓存（QQ 原图 + AstrBot 临时图片） |
+| `image_cleanup_days` | int | `7` | 保留最近多少天的图片缓存 |
+| `image_cleanup_hour` | int | `4` | 每天几点执行清理（0-23，默认 4） |
+| `image_cleanup_qq` | bool | `true` | 清理 QQ/NapCat 的旧原图缓存（Ori） |
+| `image_cleanup_astrbot_temp` | bool | `true` | 清理 AstrBot 临时图片文件 |
+| `aquiz_enable` | bool | `false` | 夜间谱面问答任务：向指定群的 aquadx bot 询问曲目别名与谱面信息（只在目标群发送） |
+| `aquiz_group` | string | `1129978061` | 谱面问答目标群号 |
+| `aquiz_start` | string | `23:10` | 夜间任务开始时间（HH:MM） |
+| `aquiz_end` | string | `06:30` | 夜间任务结束时间（HH:MM） |
+| `aquiz_interval_s` | int | `90` | 两次提问之间的最小间隔（秒） |
+| `aquiz_reply_wait_s` | int | `40` | 等待 aquadx 回复的秒数 |
+| `aquiz_max` | int | `30` | 本次任务最多提问数量 |
+| `main_admin_qq` | string | `3565630243` | 唯一管理员/老板的 QQ（每次对话都会作为权威事实注入，避免认错人） |
+| `ops_admin_qqs` | list | `["3565630243"]` | 管理员/维护者 QQ（不是店主；店主=群主，自动识别） |
+| `maidx_cert` | string | 空 | maidx 机台管理证书文件（.p12）的绝对路径 |
+| `maidx_cert_password` | string | 空 | maidx 证书的安装密码（下载页上给的那个） |
+| `dx_enable` | bool | `false` | /dx玩家 机台信息查询总开关 |
+| `b50_enable` | bool | `true` | /b50 查分（Best50 图片）总开关 |
+| `b50_enable_image` | bool | `true` | /b50 是否出图片 |
+| `b50_render_interval_seconds` | int | `15` | /b50 图片渲染最小间隔（秒/人，排队） |
+| `b50_cooldown_seconds` | int | `15` | /b50 同一用户冷却（秒） |
+| `b50_cache_ttl_seconds` | int | `120` | /b50 图片缓存秒数（同一分钟同成绩复用） |
+| `b50_allow_others` | bool | `false` | 允许用 /b50 昵称 /QQ号 查别人的成绩 |
+| `b50_qq_min_length` | int | `5` | 把参数当 QQ 号处理的最短位数 |
+| `vchart_api_key` | string | 空 | v.wmc.pub 谱面平台只读 API Key（mk_live_ 开头，留空用内置兜底钥匙） |
+| `vchart_enable` | bool | `true` | chart_lookup 时附带 v.wmc.pub 社区评分/标签/评论（只读） |
+| `presence_confirm_seconds` | int | `45` | 进/离店二次确认时间（秒） |
+| `presence_flap_merge_seconds` | int | `180` | 进店/离店重复播报合并窗口（秒） |
 ## 图片渲染说明
 
 - 渲染在本机完成：Jinja2（`autoescape=True`）生成 HTML → Playwright 无头截图（视口宽 1080，高度随内容延展）；
@@ -301,12 +371,11 @@ docker compose up -d --build
   其余任何网络请求都会被拦截；
 - 相同数据同一分钟内复用缓存；图片保存在 AstrBot 的 `data/plugin_data/astrbot_plugin_dcs_whosin/image_cache`
   （超过 15 分钟自动清理），插件目录可以只读。
-
 ## 版本历史
 
 | 版本 | 里程碑 |
 |------|--------|
-| v2.0 | 本机渲染（Playwright + Edge）替换第三方 T2I 服务；Windows 一键部署 / 控制台 / 看门狗 |
+| v2.0 | 本机渲染（Playwright + Edge）替换第三方 T2I 服务；Windows 本机部署 |
 | v2.1 | 进/离店播报；竖向排版、时长向上取整；`/jg` 时段价格 |
 | v2.2 | 访问记录流通道（无盲区、真实结算扣费） |
 | v2.3 | Webhook 实时接收服务；统一去重表 |
@@ -317,7 +386,7 @@ docker compose up -d --build
 | **v3.0** | **接入站点统一 Bot API（`getPresentUsers`/`bindQq`）；移除页面抓取、Webhook 与记录流旧通道；项目介绍更新** |
 | **v3.1** | **包场（包机）管理：@bot 登记/取消，包场时段 `/j` 改为包场提示** |
 | **v3.2** | **查询过场台词：`/j` 先发一句人设台词再出结果（台词池与停顿可配置）** |
-| **v3.3** | **接入 DeepSeek 联网搜索（`web_search` 工具），可查询实时信息** |
+| **v3.3** | **接入联网搜索（`web_search` 工具），可查询实时信息** |
 | **v3.3.1** | **修复联网搜索取密钥失败（改用服务商实例读取）；完善搜索判断规则** |
 | **v3.4** | **新增萌娘百科词条查询（`moegirl_lookup`：搜索 + 正文抓取）** |
 | **v3.5** | **新增音游资料查询（`rhythm_lookup`）与谱面查询（`chart_lookup`）；提示词自然化、允许长回复、强化反幻觉** |
@@ -328,18 +397,24 @@ docker compose up -d --build
 | **v3.8** | **私聊白名单（好友可用私聊指令）；亲密好友识别注入；记忆容量提升（120 条 / 注入 3500 字）** |
 | **v3.8.1** | **长期记忆合并规则收紧（非明显过时不再删除旧条目）** |
 | **v3.8.2** | **修复私信无法到达：适配器补丁放行私信白名单好友；新增收到私聊日志** |
-| **v3.9** | **玩家档案库：260 位群友画像（称呼/话题/性格）；`player_lookup` 工具、当前说话者档案注入、`/players` 查询** |
+| **v3.9** | **玩家档案库：群友画像（称呼/话题/性格）；`player_lookup` 工具、当前说话者档案注入、`/players` 查询** |
 | **v3.9.1** | **强化说话者身份绑定：群名片+QQ 明确当前对话者，「我是谁」只按该身份回答** |
 | **v3.9.2** | **长期记忆干净化：只保留全群通用知识，个人称呼/性格等不再入库（改由玩家档案库负责）** |
 | **v3.9.3** | **说话者身份写入用户消息（[说话者：群名片(QQ)] 前缀），并重置被错误历史污染的群会话** |
-| **v3.10** | **玩家档案补充站点身份（STAFF/管理员/赞助/玩家）；自动识别群主为店主并写回配置；区分管理员/维护者与店主** |
-| **v3.11** | **店员/店主名单注入对话；`player_lookup` 支持按身份查询；新增 `remember` 工具（群知识 / 个人档案自动分类）** |
+| **v3.10** | **玩家档案补充站点身份；自动识别群主为店主并写回配置；区分管理员/维护者与店主** |
+| **v3.11** | **店员/店主名单注入对话；`player_lookup` 支持按身份查询；新增 `remember` 工具** |
 | **v3.11.1** | **身份问题改为当轮消息注入名单/档案，重置群会话，修复长历史导致沿用旧回答** |
 | **v3.12.0** | **待机语录：小奏只想发「……」时自动换成一句待机台词（可自定义）** |
 | **v3.12.1** | **待机语录降低频率：默认 20% 概率发送、10 分钟冷却，其余静默不在群里刷屏** |
 | **v3.13.0** | **私聊注入长期记忆与对方档案；新增群聊记录检索工具；记忆汇总保留游戏/角色知识** |
 | **v3.14.0** | **夜间谱面问答：向指定群的 aquadx bot 发送「XXX是什么歌？」并收集回复，生成报告** |
 | **v3.14.1** | **谱面问答加固：插件重载取消任务、首条无回立即停、修复定数读取、群消息调试日志** |
+| **v3.15.0** | **读图修复：适配器优先使用 NapCat 本地图片文件，解决 QQ 图片链接过期导致读图空白** |
+| **v3.15.1** | **图片缓存自动清理：默认保留 7 天、每天 4:00 清理 QQ 原图与 AstrBot 临时图片，支持 `/imgclean now`** |
+| **v3.16.0** | **电脑控制：授权操作员私聊可用本机 shell/Python 与 OpenCode 桥接；执行日志审计** |
+| **v3.16.1** | **电脑控制扩展到指定群 1072977398（全员可用），其他群/私聊仍禁止** |
+| **v3.16.2** | **会馆群 1030377150 仅操作员本人可用电脑控制；该群其他人调用一律拒绝** |
+| **v3.17.0** | **本地化收口：`/b50` 查分图、`/dx玩家` 机台查询、v.wmc.pub 谱面社区评分全部改由本机渲染与直连；README 全篇改为本机部署口径；删掉 Windows 一键脚本 / watchdog / 打包辅助，`deploy/` 只留可选容器与 Linux 脚本** |
 
 ## 常见问题
 
@@ -351,13 +426,14 @@ docker compose up -d --build
    看 AstrBot 日志：提示缺少依赖时，在插件页为本插件安装依赖后重载；提示找不到浏览器时，
    在 `render_browser_path` 填写 Edge / Chrome 的路径；渲染超时可调大 `render_timeout_seconds`。
 4. **图片里的中文或日文显示为方块？**
-   Linux / Docker 需安装中文字体（如 `fonts-noto-cjk`）；Windows 自带字体即可。
+   本机已自带字体，一般不会方块；真出现就在 `assets/fonts/` 里补字体文件。
 5. **发送 `j` 没反应？**
    AstrBot 默认唤醒前缀为 `/`，请发送 `/j`；并确认群号在 AstrBot 白名单与 `allowed_groups` 中。
 6. **`jg` 价格不对或取不到？**
    时段价格来自站点 `/chargecalc`，需要 `login_username` / `login_password`（或 Cookie）可登录；每 6 小时自动刷新。
 7. **升级 AstrBot 后，状态推送提示「适配器补丁未检测到」？**
-   在控制台选 [4] 重新打补丁，再重启 AstrBot。在此期间 AstrBot 白名单仍只放行目标群。
+   按补丁步骤在本机重新打一次适配器补丁（打完后插件启动会自检），再重启 AstrBot。
+   在此之前 AstrBot 白名单仍只放行目标群，其他人进不来。
 
 ## 开发与调试
 

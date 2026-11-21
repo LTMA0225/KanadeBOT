@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  /* 素材全部本地内联（封面走 data URI），渲染器会拦截一切外网请求 */
+  @font-face {
+    font-family: "ZCOOL KuaiLe";
+    src: url("{{ asset_base }}/fonts/ZCOOLKuaiLe-Regular.ttf") format("truetype");
+    font-display: block;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; }
+  body {
+    font-family: "ZCOOL KuaiLe", "Microsoft YaHei", "PingFang SC", sans-serif;
+    color: #eef2ff;
+  }
+  .frame {
+    position: relative;
+    width: 100%;
+    padding: 24px 26px 14px;
+    background-image:
+      linear-gradient(170deg, rgba(9, 12, 30, 0.86), rgba(14, 10, 34, 0.92) 70%, rgba(7, 8, 22, 0.96)),
+      url("{{ asset_base }}/bg.jpg");
+    background-size: cover;
+    background-position: center 22%;
+  }
+  .frame::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background:
+      radial-gradient(90% 70% at 82% 0%, rgba(150, 120, 255, 0.18), transparent 60%),
+      radial-gradient(80% 60% at 8% 100%, rgba(80, 200, 255, 0.12), transparent 62%);
+  }
+
+  header { position: relative; display: flex; align-items: flex-end; gap: 18px; padding-bottom: 14px; border-bottom: 1px solid rgba(180, 200, 255, 0.22); }
+  .logo-card {
+    flex: none;
+    background: rgba(12, 18, 42, 0.40);
+    border: 1px solid rgba(255, 255, 255, 0.32);
+    border-radius: 16px;
+    padding: 6px 14px;
+  }
+  .logo-card img { height: 42px; display: block; }
+  .who { flex: 1; min-width: 0; }
+  .who .kicker { font-size: 12px; letter-spacing: 0.34em; color: rgba(190, 205, 250, 0.72); }
+  .who h1 { font-size: 34px; line-height: 1.25; letter-spacing: 0.06em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-shadow: 0 2px 12px rgba(10, 14, 40, 0.9); }
+  .who .sub { margin-top: 4px; font-size: 13px; letter-spacing: 0.16em; color: rgba(205, 215, 250, 0.78); }
+  .rating { flex: none; text-align: right; }
+  .rating .num { font-size: 44px; line-height: 1; color: #fff; text-shadow: 0 0 20px rgba(150, 180, 255, 0.65); }
+  .rating .lbl { margin-top: 4px; font-size: 12px; letter-spacing: 0.32em; color: rgba(190, 205, 250, 0.75); }
+  .rating .plate { margin-top: 2px; font-size: 13px; color: rgba(255, 226, 185, 0.9); }
+
+  .headline { position: relative; display: flex; align-items: center; gap: 14px; margin: 16px 0 10px; }
+  .tag {
+    font-size: 12px;
+    letter-spacing: 0.16em;
+    padding: 3px 13px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.42);
+    background: linear-gradient(135deg, rgba(140, 170, 255, 0.5), rgba(190, 160, 255, 0.42));
+  }
+  .headline .sum { margin-left: auto; font-size: 14px; letter-spacing: 0.08em; color: rgba(215, 225, 255, 0.86); }
+
+  .grid { position: relative; display: grid; gap: 8px; }
+  .grid.old { grid-template-columns: repeat(7, 1fr); }
+  .grid.new { grid-template-columns: repeat(5, 1fr); }
+
+  .card {
+    position: relative;
+    border-radius: 10px;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    background: rgba(16, 22, 48, 0.72);
+    box-shadow: 0 4px 14px rgba(0, 0, 30, 0.45);
+  }
+  .thumb { position: relative; aspect-ratio: 1 / 1; background: rgba(28, 34, 66, 0.9); }
+  .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .thumb .blank {
+    width: 100%; height: 100%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; letter-spacing: 0.12em; color: rgba(190, 205, 250, 0.55);
+    padding: 6px; text-align: center; word-break: break-all;
+  }
+  .rate {
+    position: absolute; top: 5px; left: 5px;
+    font-size: 11px; letter-spacing: 0.04em;
+    padding: 1px 6px; border-radius: 999px;
+    background: rgba(8, 12, 30, 0.78);
+    border: 1px solid rgba(255, 255, 255, 0.35);
+  }
+  .rate.apex  { color: #fff5b8; border-color: rgba(255, 235, 140, 0.85); box-shadow: 0 0 12px rgba(255, 220, 120, 0.55); }
+  .rate.sssp  { color: #ffe9a8; }
+  .rate.sss   { color: #ffd6a5; }
+  .rate.ssp   { color: #c9e4ff; }
+  .rate.ss    { color: #b9d4ff; }
+  .rate.sp    { color: #a8e6ff; }
+  .rate.s     { color: #b6f2c8; }
+  .rate.aaa   { color: #cfe6b6; }
+  .rate.a     { color: #e6e6b6; }
+  .rate.other { color: #d8d8e8; }
+  .type {
+    position: absolute; top: 5px; right: 5px;
+    font-size: 10px; letter-spacing: 0.04em;
+    padding: 1px 5px; border-radius: 4px;
+    background: rgba(8, 12, 30, 0.78);
+    border: 1px solid rgba(255, 255, 255, 0.30);
+    color: rgba(220, 230, 255, 0.9);
+  }
+  .type.dx { color: #ffd9a8; border-color: rgba(255, 200, 140, 0.6); }
+  .badge {
+    position: absolute; bottom: 5px; right: 5px;
+    font-size: 10px; letter-spacing: 0.04em;
+    padding: 1px 5px; border-radius: 4px;
+    background: rgba(255, 240, 170, 0.92);
+    color: rgba(40, 30, 0, 0.92);
+  }
+  .meta { padding: 5px 7px 6px; }
+  .title { font-size: 12px; line-height: 1.25; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row { margin-top: 3px; display: flex; align-items: center; gap: 6px; font-size: 11px; }
+  .lv {
+    flex: none; padding: 0 5px; border-radius: 4px;
+    background: rgba(255, 255, 255, 0.14);
+    border: 1px solid rgba(255, 255, 255, 0.24);
+  }
+  .lv.basic    { color: #9fe6a0; border-color: rgba(160, 230, 160, 0.45); }
+  .lv.advanced { color: #ffd59a; border-color: rgba(255, 210, 150, 0.45); }
+  .lv.expert   { color: #ff9f9f; border-color: rgba(255, 160, 160, 0.45); }
+  .lv.master   { color: #e0b0ff; border-color: rgba(220, 175, 255, 0.45); }
+  .lv.remaster { color: #f2f2ff; border-color: rgba(255, 255, 255, 0.55); }
+  .ach { color: rgba(240, 245, 255, 0.95); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ra { margin-left: auto; flex: none; color: rgba(255, 226, 185, 0.95); }
+
+  footer { position: relative; margin-top: 14px; display: flex; justify-content: space-between; font-size: 12px; letter-spacing: 0.14em; color: rgba(200, 212, 250, 0.72); }
+  footer .heart { color: rgba(255, 190, 220, 0.9); }
+</style>
+</head>
+<body>
+  <div class="frame">
+    <header>
+      {% if logo_available %}<div class="logo-card"><img src="{{ asset_base }}/logo.svg" alt="直流会馆"></div>{% endif %}
+      <div class="who">
+        <div class="kicker">BEST 50 · 直流会馆</div>
+        <h1>{{ name|e }}</h1>
+        <div class="sub">查分器 ID {{ username|e }}{% if display_name and display_name != name %} · 群名片 {{ display_name|e }}{% endif %}</div>
+      </div>
+      <div class="rating">
+        <div class="num">{{ rating }}</div>
+        <div class="lbl">RATING</div>
+        {% if plate %}<div class="plate">{{ plate|e }}</div>{% endif %}
+      </div>
+    </header>
+
+    <div class="headline">
+      <span class="tag">旧谱 BEST 35</span>
+      <span class="sum">合计 {{ old_sum }}（{{ old_count }} 张）</span>
+    </div>
+    <div class="grid old">
+      {% for c in old %}
+      <div class="card">
+        <div class="thumb">
+          {% if c.cover %}<img src="{{ c.cover }}" alt="">{% else %}<div class="blank">{{ c.level }}{{ c.label|e }}</div>{% endif %}
+          {% if c.rate_label %}<span class="rate {{ c.rate_class }}">{{ c.rate_label|e }}</span>{% endif %}
+          <span class="type {{ 'dx' if c.type == 'DX' else '' }}">{{ c.type }}</span>
+          {% if c.badge %}<span class="badge">{{ c.badge|e }}</span>{% endif %}
+        </div>
+        <div class="meta">
+          <div class="title">{{ c.title|e }}</div>
+          <div class="row">
+            <span class="lv {{ c.level_class }}">{{ c.level|e }}</span>
+            <span class="ach">{{ c.achievements }}{{ '%' }}</span>
+            <span class="ra">+{{ c.ra }}</span>
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+
+    <div class="headline">
+      <span class="tag">新谱 BEST 15</span>
+      <span class="sum">合计 {{ new_sum }}（{{ new_count }} 张）</span>
+    </div>
+    <div class="grid new">
+      {% for c in new %}
+      <div class="card">
+        <div class="thumb">
+          {% if c.cover %}<img src="{{ c.cover }}" alt="">{% else %}<div class="blank">{{ c.level }}{{ c.label|e }}</div>{% endif %}
+          {% if c.rate_label %}<span class="rate {{ c.rate_class }}">{{ c.rate_label|e }}</span>{% endif %}
+          <span class="type {{ 'dx' if c.type == 'DX' else '' }}">{{ c.type }}</span>
+          {% if c.badge %}<span class="badge">{{ c.badge|e }}</span>{% endif %}
+        </div>
+        <div class="meta">
+          <div class="title">{{ c.title|e }}</div>
+          <div class="row">
+            <span class="lv {{ c.level_class }}">{{ c.level|e }}</span>
+            <span class="ach">{{ c.achievements }}{{ '%' }}</span>
+            <span class="ra">+{{ c.ra }}</span>
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+
+    <footer>
+      <span>{{ time_text }} · 数据来自水鱼查分器</span>
+      <span>宵崎奏 Bot <span class="heart">♪</span> 25時、ナイトコードで。</span>
+    </footer>
+  </div>
+</body>
+</html>

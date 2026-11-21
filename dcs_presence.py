@@ -17,18 +17,32 @@ _ROLE_MAP = {
 }
 
 DEFAULT_PRICING: Dict[str, Any] = {
-    "validFrom": "2026-09-17T00:00:00.000+08:00",
+    "validFrom": "2026-11-15T00:00:00.000+08:00",
     "admissionBalance": 1000,
-    "globalDiscount": 0.7,
+    "globalDiscount": 1.0,
+    "capStartMinute": 600,
+    "capEndMinute": 1680,
+    "capFullMinutes": 240,
+    "capHalfMinutes": 240,
+    "weekendDays": [5, 6],
+    "holidayDates": [],
     "circadyRates": [
         {"startMinute": 0, "endMinute": 240, "maxout": None, "rate": 25,
-         "globalDiscountApply": True, "comment": "平价"},
+         "globalDiscountApply": True, "comment": "夜间"},
         {"startMinute": 240, "endMinute": 600, "maxout": None, "rate": 10,
-         "globalDiscountApply": False, "comment": "舞萌维护期+早鸟激励"},
-        {"startMinute": 600, "endMinute": 1320, "maxout": 240, "rate": 25,
-         "globalDiscountApply": True, "comment": "白天4小时封顶"},
-        {"startMinute": 1320, "endMinute": 1440, "maxout": None, "rate": 30,
-         "globalDiscountApply": True, "comment": "黄金时段"},
+         "globalDiscountApply": True, "comment": "早鸟 6 元/小时"},
+        {"startMinute": 600, "endMinute": 1080, "maxout": None, "rate": 20,
+         "globalDiscountApply": True, "comment": "工作日白天 12 元/小时"},
+        {"startMinute": 1080, "endMinute": 1440, "maxout": None, "rate": 25,
+         "globalDiscountApply": True, "comment": "夜间 15 元/小时"},
+    ],
+    "weekendRates": [
+        {"startMinute": 0, "endMinute": 240, "maxout": None, "rate": 25,
+         "globalDiscountApply": True, "comment": "夜间 15 元/小时"},
+        {"startMinute": 240, "endMinute": 600, "maxout": None, "rate": 10,
+         "globalDiscountApply": True, "comment": "早鸟 6 元/小时"},
+        {"startMinute": 600, "endMinute": 1440, "maxout": None, "rate": 25,
+         "globalDiscountApply": True, "comment": "周末/节假日 15 元/小时"},
     ],
 }
 
@@ -96,59 +110,84 @@ def _clock_minutes(ms: int) -> int:
 def _day_start_ms(ms: int) -> int:
     return ((ms + _FLT_OFFSET_MS) // _DAY_MS) * _DAY_MS - _FLT_OFFSET_MS
 
+def _segments_for(pricing: Dict[str, Any], day_start_ms: int) -> List[Dict[str, Any]]:
+    try:
+        day = datetime.fromtimestamp(day_start_ms / 1000, FLT)
+        date_str = day.date().isoformat()
+    except Exception:
+        date_str = ""
+    try:
+        weekend_days = {int(x) for x in (pricing.get("weekendDays") or [5, 6])}
+    except (TypeError, ValueError):
+        weekend_days = {5, 6}
+    try:
+        weekday = datetime.fromtimestamp(day_start_ms / 1000, FLT).weekday()
+    except Exception:
+        weekday = 0
+    holidays = {str(x)[:10] for x in (pricing.get("holidayDates") or [])}
+    if weekday in weekend_days or date_str in holidays:
+        rates = pricing.get("weekendRates")
+        if isinstance(rates, list) and rates:
+            return [s for s in rates if isinstance(s, dict)]
+    return [s for s in (pricing.get("circadyRates") or []) if isinstance(s, dict)]
+
+
 def calculate_charge_fen(
     entered_ms: int,
     left_ms: int,
     pricing: Dict[str, Any],
     multiplier: float = 1.0,
 ) -> float:
-    segments = [s for s in (pricing.get("circadyRates") or []) if isinstance(s, dict)]
+    if left_ms <= entered_ms:
+        return 0.0
     try:
         global_discount = float(pricing.get("globalDiscount") or 0)
     except (TypeError, ValueError):
         global_discount = 0.0
-    if not segments or left_ms <= entered_ms:
-        return 0.0
-
-    leave_min = _clock_minutes(left_ms)
-    leave_day = _day_start_ms(left_ms)
-    cursor_min = _clock_minutes(entered_ms)
-    cursor_day = _day_start_ms(entered_ms)
+    try:
+        cap_start = int(pricing.get("capStartMinute", 600) or 600)
+        cap_end = int(pricing.get("capEndMinute", 1680) or 1680)
+        cap_full = max(0, int(pricing.get("capFullMinutes", 240) or 240))
+        cap_half = max(0, int(pricing.get("capHalfMinutes", 240) or 240))
+    except (TypeError, ValueError):
+        cap_start, cap_end, cap_full, cap_half = 600, 1680, 240, 240
+    usage: Dict[int, int] = {}
     total = 0.0
-
-    for _ in range(64):
-        segment = None
-        for s in segments:
-            start = int(s.get("startMinute", 0))
-            end = int(s.get("endMinute", 0))
-            if start <= cursor_min < end:
-                segment = s
+    cursor = int(entered_ms)
+    while cursor < left_ms:
+        day_start = _day_start_ms(cursor)
+        minute = _clock_minutes(cursor)
+        segments = _segments_for(pricing, day_start)
+        rate = None
+        applied = True
+        for segment in segments:
+            start = int(segment.get("startMinute", 0))
+            end = int(segment.get("endMinute", 0))
+            if start <= minute < end:
+                rate = float(segment.get("rate", 0) or 0)
+                applied = bool(segment.get("globalDiscountApply"))
                 break
-        if segment is None:
-            break
-        rate = float(segment.get("rate", 0) or 0)
-        apply_discount = bool(segment.get("globalDiscountApply"))
-        discount = global_discount if (apply_discount or global_discount == 0) else 1.0
-
-        if cursor_day == leave_day and leave_min <= int(segment.get("endMinute", 0)):
-            duration = leave_min - cursor_min
-            if duration > 0:
-                maxout = segment.get("maxout")
-                capped = min(duration, int(maxout)) if maxout else duration
-                total += capped * rate * discount
-            break
-
-        next_min = int(segment.get("endMinute", 0))
-        duration = next_min - cursor_min
-        if duration > 0:
-            maxout = segment.get("maxout")
-            capped = min(duration, int(maxout)) if maxout else duration
-            total += capped * rate * discount
-        cursor_min = next_min
-        if cursor_min >= 1440:
-            cursor_min = 0
-            cursor_day += _DAY_MS
-
+        if rate is None:
+            cursor += 60000
+            continue
+        discount = global_discount if (applied or global_discount == 0) else 1.0
+        window = None
+        if minute >= cap_start:
+            window = day_start
+        elif minute < (cap_end - 1440):
+            window = day_start - _DAY_MS
+        factor = 1.0
+        if window is not None:
+            used = usage.get(window, 0)
+            if used < cap_full:
+                factor = 1.0
+            elif used < cap_full + cap_half:
+                factor = 0.5
+            else:
+                factor = 0.0
+            usage[window] = used + 1
+        total += rate * discount * factor
+        cursor += 60000
     try:
         mult = abs(float(multiplier)) if multiplier is not None else 1.0
     except (TypeError, ValueError):
@@ -156,6 +195,7 @@ def calculate_charge_fen(
     if mult == 0:
         return 0.0
     return total * mult
+
 
 def format_fee_yuan(fen: float) -> str:
     return f"{fen / 100:.2f}"
@@ -171,11 +211,11 @@ def format_discount_zhe(ratio: float) -> str:
     return f"{raw // 10}.{raw % 10}折"
 
 def current_rate_info(pricing: Dict[str, Any], now_ms: Optional[int] = None) -> Optional[Dict[str, Any]]:
-    segments = [s for s in (pricing.get("circadyRates") or []) if isinstance(s, dict)]
-    if not segments:
-        return None
     now = int(now_ms if now_ms is not None else time.time() * 1000)
     minute = _clock_minutes(now)
+    segments = _segments_for(pricing, _day_start_ms(now))
+    if not segments:
+        return None
     try:
         global_discount = float(pricing.get("globalDiscount") or 0)
     except (TypeError, ValueError):
@@ -197,6 +237,11 @@ def current_rate_info(pricing: Dict[str, Any], now_ms: Optional[int] = None) -> 
             "base_fen": base_fen,
             "final_fen": base_fen * multiplier,
             "discount": multiplier,
+            "cap_note": (
+                "10:00-28:00 期间：第 4-8 小时半价，8 小时后不计费（封顶）"
+                if (600 <= minute < 1440 or minute < 240)
+                else ""
+            ),
         }
     return None
 
@@ -215,7 +260,11 @@ def format_current_rate_message(
             hourly += "（限时免费）"
         else:
             hourly += f"（原价 ¥{info['base_fen'] / 100:.2f}，{format_discount_zhe(info['discount'])}）"
-    return "\n".join([f"{prefix}当前时段价格", head, f"每小时：{hourly}"])
+    lines = [f"{prefix}当前时段价格", head, f"每小时：{hourly}"]
+    if info.get("cap_note"):
+        lines.append(info["cap_note"])
+    lines.append("包机/包场事项请看群公告【包机包场】栏")
+    return "\n".join(lines)
 
 def map_role(raw: Any) -> str:
     return _ROLE_MAP.get(str(raw or "CUSTOMER"), "player")

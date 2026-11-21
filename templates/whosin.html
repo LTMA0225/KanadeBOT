@@ -143,6 +143,46 @@
   .pmeta .k { color: rgba(190, 205, 245, 0.65); }
   .pdur { margin-top: 2px; font-size: 14px; color: rgba(240, 245, 255, 0.95); text-shadow: 0 1px 6px rgba(10, 16, 40, 0.75); }
 
+  .booking {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    padding: 11px 16px;
+    border-radius: 16px;
+    border: 1px solid rgba(255, 208, 150, 0.55);
+    background: rgba(58, 34, 12, 0.34);
+    box-shadow: 0 6px 20px rgba(0, 0, 20, 0.32), inset 0 1px 0 rgba(255, 235, 200, 0.32);
+  }
+  .booking .bhead {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 14px;
+    letter-spacing: 0.16em;
+    color: rgba(255, 226, 185, 0.95);
+    text-shadow: 0 1px 6px rgba(20, 10, 0, 0.70);
+  }
+  .booking .brow {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 19px;
+    color: #fff;
+    text-shadow: 0 2px 8px rgba(20, 12, 0, 0.80);
+  }
+  .booking .bmachine { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .booking .btag {
+    flex: none;
+    font-size: 13px;
+    letter-spacing: 0.10em;
+    padding: 1px 9px;
+    border-radius: 999px;
+    color: rgba(70, 35, 0, 0.95);
+    background: rgba(255, 214, 155, 0.92);
+  }
+  .booking .brow.later { font-size: 16px; color: rgba(240, 235, 255, 0.92); }
+  .booking .btag.later { background: rgba(226, 225, 250, 0.70); color: rgba(40, 34, 70, 0.92); }
+
   footer {
     margin-top: auto;
     display: flex;
@@ -175,6 +215,18 @@
         <div class="weekday">{{ weekday_text }}</div>
       </div>
     </header>
+
+    {% if booking_now or booking_later %}
+    <section class="booking">
+      <div class="bhead">✧ 包机 / 包场预告</div>
+      {% for b in booking_now %}
+      <div class="brow"><span class="btag">{% if b.running %}进行中{% else %}即将开始{% endif %}</span><span class="bmachine">{{ b.machine|e }}</span><span>{{ b.window|e }}</span></div>
+      {% endfor %}
+      {% for b in booking_later %}
+      <div class="brow later"><span class="btag later">稍后</span><span class="bmachine">{{ b.machine|e }}</span><span>{{ b.window|e }}</span></div>
+      {% endfor %}
+    </section>
+    {% endif %}
 
     <section class="block players">
       <div class="block-head">

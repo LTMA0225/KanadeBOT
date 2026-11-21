@@ -256,7 +256,12 @@ class _BrowserWorker:
     @staticmethod
     async def _screenshot_once(context, html: str, assets: LocalAssets, timeout_ms: int) -> bytes:
         async def handle_route(route) -> None:
-            item = assets.lookup(route.request.url)
+            url = route.request.url
+            if url.startswith("data:"):
+                # 内联图片（谱面封面等）直接放行，不走本地资源表
+                await route.continue_()
+                return
+            item = assets.lookup(url)
             if item is None:
                 await route.abort("blockedbyclient")
                 return
@@ -348,18 +353,33 @@ class WhosinRenderer:
             )
         return self._env
 
-    def render_html(self, payload: Dict[str, Any], theme: str = DEFAULT_THEME) -> str:
-        template_name = THEME_TEMPLATES.get(theme, THEME_TEMPLATES[DEFAULT_THEME])
+    def render_html(
+        self,
+        payload: Dict[str, Any],
+        theme: str = DEFAULT_THEME,
+        template_name: str = "",
+    ) -> str:
+        if not template_name:
+            template_name = THEME_TEMPLATES.get(theme, THEME_TEMPLATES[DEFAULT_THEME])
         context = dict(payload)
         context["asset_base"] = LOCAL_ASSET_BASE
         context["logo_available"] = self.assets.exists("logo.svg")
+        # 模板里包场块是可选段，缺省填空列表避免未定义报错
+        context.setdefault("booking_now", [])
+        context.setdefault("booking_later", [])
         return self._get_env().get_template(template_name).render(**context)
 
     @staticmethod
-    def build_cache_key(payload: Dict[str, Any], theme: str = DEFAULT_THEME) -> str:
+    def build_cache_key(
+        payload: Dict[str, Any],
+        theme: str = DEFAULT_THEME,
+        template_name: str = "",
+        salt: str = "",
+    ) -> str:
         raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         minute = time.strftime("%Y%m%d%H%M")
-        return hashlib.md5(f"{raw}|{theme}|{minute}".encode("utf-8")).hexdigest()
+        material = f"{raw}|{theme}|{template_name}|{salt}|{minute}"
+        return hashlib.md5(material.encode("utf-8")).hexdigest()
 
     async def render(
         self,
@@ -369,14 +389,19 @@ class WhosinRenderer:
         browser: str = "auto",
         browser_path: str = "",
         timeout: float = 20.0,
+        template_name: str = "",
+        cache_salt: str = "",
+        prefix: str = "whosin",
     ) -> Optional[str]:
-        cache_key = self.build_cache_key(payload, theme)
+        cache_key = self.build_cache_key(
+            payload, theme, template_name=template_name, salt=cache_salt
+        )
         cached = await self.cache.get(cache_key, ttl)
         if cached:
             return cached
 
         try:
-            html = self.render_html(payload, theme)
+            html = self.render_html(payload, theme, template_name)
         except ImportError:
             self._log_missing_dependency("jinja2")
             return None
@@ -399,7 +424,7 @@ class WhosinRenderer:
             return None
 
         try:
-            path = self._save_png(png, cache_key)
+            path = self._save_png(png, cache_key, prefix)
         except OSError as exc:
             logger.warning(f"[dcs_whosin] 图片写入失败：{exc!r}")
             return None
@@ -414,9 +439,9 @@ class WhosinRenderer:
                 "请在 AstrBot 插件页点击本插件的「安装依赖」后重载插件。"
             )
 
-    def _save_png(self, png: bytes, cache_key: str) -> str:
+    def _save_png(self, png: bytes, cache_key: str, prefix: str = "whosin") -> str:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        target = self.cache_dir / f"whosin_{cache_key}.png"
+        target = self.cache_dir / f"{prefix or 'whosin'}_{cache_key}.png"
         temp = target.with_suffix(".tmp")
         temp.write_bytes(png)
         temp.replace(target)

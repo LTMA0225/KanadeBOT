@@ -41,12 +41,15 @@ def parse_present_users(data: Any) -> Optional[List[Dict[str, Any]]]:
         except (TypeError, ValueError):
             user_id = None
         qqid = str(item.get("qqid") or "").strip()
+        # key 优先用稳定标识：id > qqid > 昵称。
+        # 站点个别记录既没有 id 也没有 qqid，且 enteredAt 会随每次请求抖动，
+        # 所以入场时间不再参与 key，只用来算时长，避免进/离店反复触发。
         if user_id is not None:
             key = f"id:{user_id}"
         elif qqid:
             key = f"qq:{qqid}"
         else:
-            key = f"e:{entered}:{name}"
+            key = f"n:{name}"
         users.append({
             "key": key,
             "id": user_id,
