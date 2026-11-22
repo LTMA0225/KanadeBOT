@@ -801,6 +801,11 @@ class DcsWhosinPlugin(Star):
                 self._b50_next_at = time.monotonic() + max(interval, 0)
 
     @staticmethod
+    def _awmc_identity(event: AstrMessageEvent, qq: str) -> dict:
+        name = str(event.get_sender_name() or '').strip()
+        return {'nickname': name if name and not name.isdigit() else f'maimai_{qq}'}
+
+    @staticmethod
     def _awmc_sender(event: AstrMessageEvent) -> str:
         if event.get_platform_name() != 'aiocqhttp':
             return ''
@@ -829,7 +834,8 @@ class DcsWhosinPlugin(Star):
         try:
             try:
                 response = await self._awmc.request('POST', qq, '/jobs', {
-                    'kind': kind, 'request_id': dcs_awmc.request_id(event, kind), **payload,
+                    'kind': kind, 'request_id': dcs_awmc.request_id(event, kind),
+                    **self._awmc_identity(event, qq), **payload,
                 })
             except dcs_awmc.BridgeError as exc:
                 if exc.code == 'network':
@@ -938,7 +944,7 @@ class DcsWhosinPlugin(Star):
         if dcs_awmc.contains_qr(raw) or image is not None:
             if note := self._awmc_recall_hint(event):
                 await event.send(event.plain_result(note))
-        account = await self._awmc.request('GET', qq, '/account')
+        account = await self._awmc.request('GET', qq, '/account', self._awmc_identity(event, qq))
         agreement = dcs_awmc.agreement_from(account)
         if not agreement['accepted']:
             self._awmc_pending.pop(key, None)
@@ -999,7 +1005,7 @@ class DcsWhosinPlugin(Star):
             return str(result['message'])
         if action == 'account' and arg and arg != qq:
             return 'KanadeBot 按发消息的 QQ 开通 AWMC。直接发 /qbind 即可。'
-        account = await self._awmc.request('GET', qq, '/account')
+        account = await self._awmc.request('GET', qq, '/account', self._awmc_identity(event, qq))
         agreement = dcs_awmc.agreement_from(account)
         if action == 'accept' and arg:
             result = await self._awmc.request('POST', qq, '/agreement', {
@@ -1008,9 +1014,10 @@ class DcsWhosinPlugin(Star):
             return str(result['message'])
         if action in ('accept', 'terms') or not agreement['accepted']:
             return agreement['message']
+        forum = (f"BBS：{account.get('forum_username')}" if account.get('forum_linked') else 'BBS：尚未创建')
         if account.get('arcade_bound'):
-            return '当前 QQ 已开通 AWMC，已绑定舞萌账号。可用 /b50、/u 或 /maiu。'
-        return '当前 QQ 已开通 AWMC。可用 /b50 查已有成绩，或发 /mai绑定 录入舞萌账号。'
+            return forum + '\n已绑定舞萌账号，可用 /b50、/u 或 /maiu。'
+        return forum + '\n未绑定舞萌账号，可用 /b50 查已有成绩，或发 /mai绑定 录入。'
 
     @filter.regex(r"^包(?:机|场)\s*\S")
     async def booking_add(self, event: AstrMessageEvent):
