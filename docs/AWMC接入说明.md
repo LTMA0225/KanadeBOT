@@ -42,6 +42,8 @@ AWMC_KANADE_BRIDGE_SECRET=当前为空（需新增）
 - 当前生产 HEAD：`5010eef4`（Kanade Bridge 在 PR #186，尚未部署）。
 - 群后台本机 `http://127.0.0.1:8100/group-console/` 返回 200，`maimaidx-bot.service` active。
 - 因此 Kanade 的 `awmc_bridge_url` 填 `https://group.wmc.pub`，不要带 `/group-console`。
+- 如果 Kanade 主机无法访问域名，可在 Kanade 主机建立 SSH 隧道：`ssh -p 22002 -L 18100:127.0.0.1:8100 milk@ipv4-beta.kxcym.top`，然后临时填 `awmc_bridge_url=http://127.0.0.1:18100`。
+- 如必须直接访问 `http://ipv4-beta.kxcym.top:8100`，还要显式打开 `awmc_bridge_allow_insecure_http=true`。这会明文传输二维码等凭据，只建议临时排查，排查完改回 HTTPS。
 
 ## 基础指令
 

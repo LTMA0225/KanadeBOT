@@ -242,6 +242,7 @@ class DcsWhosinPlugin(Star):
         self._b50_covers = _CoverLoader(str(cover_dir))
         self._awmc = dcs_awmc.AwmcBridge(
             str(config.get('awmc_bridge_url') or ''), str(config.get('awmc_bridge_secret') or ''),
+            allow_insecure_http=bool(config.get('awmc_bridge_allow_insecure_http', False)),
         )
         self._awmc_pending: dict[tuple[str, str], tuple[str, float]] = {}
         self._awmc_active: set[str] = set()
