@@ -917,8 +917,12 @@ class DcsWhosinPlugin(Star):
                 await self._awmc_submit_qr(event, key, action, arg, image)
             elif action == 'refresh':
                 await self._awmc_job(event, qq, 'refresh')
+            elif action in dcs_awmc.REPORT_COMMANDS:
+                await self._awmc_job(event, qq, 'report', period=dcs_awmc.REPORT_COMMANDS[action])
+            elif action in dcs_awmc.IMAGE_COMMANDS:
+                await self._awmc_job(event, qq, action)
             else:
-                reply = await self._awmc_account_command(qq, action, arg)
+                reply = await self._awmc_account_command(qq, action, arg, event)
                 if reply:
                     await event.send(event.plain_result(reply))
         except dcs_awmc.BridgeError as exc:
@@ -964,14 +968,27 @@ class DcsWhosinPlugin(Star):
         self._awmc_pending.pop(key, None)
         await self._awmc_job(event, qq, kind, qrcode=qr)
 
-    async def _awmc_account_command(self, qq: str, action: str, arg: str) -> str:
+    async def _awmc_account_command(self, qq: str, action: str, arg: str, event: AstrMessageEvent) -> str:
         if action == 'help':
             return (
                 'AWMC 指令：\n'
-                '/b50 查本人 B50｜/u 免码更新｜/maiu [二维码] 完整同步\n'
-                '/mai绑定 [二维码] 首次绑定｜/qbind 查看开通状态｜/查进度 同步进度\n'
-                '/用户协议 查看统一协议｜/撤回用户协议｜/不同意共享我的数据'
+                '/签到｜/我的awmc｜/查进度\n'
+                '/b50｜/u｜/maiu [二维码]｜/mai绑定 [二维码]\n'
+                '/日报｜/周报｜/月报｜/年报｜/开启存储数据\n'
+                '/底力分析｜/弱项处方｜/b50风险预警｜/含金量｜/含水量｜/我有多菜\n'
+                '/用户协议｜/撤回用户协议｜/不同意共享我的数据'
             )
+        if action == 'checkin':
+            group = str(event.get_group_id() or '')
+            result = await self._awmc.request('POST', qq, '/checkin', {
+                'group_id': int(group) if group.isdigit() else None,
+            })
+            return str(result.get('message') or '签到完成。')
+        if action == 'summary':
+            return dcs_awmc.format_summary(await self._awmc.request('GET', qq, '/summary'))
+        if action == 'storage':
+            result = await self._awmc.request('POST', qq, '/storage')
+            return str(result.get('message') or '已开启数据存储。')
         if action == 'progress':
             return dcs_awmc.format_progress(await self._awmc.request('GET', qq, '/progress'))
         if action == 'revoke':

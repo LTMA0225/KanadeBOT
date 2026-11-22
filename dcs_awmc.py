@@ -25,7 +25,14 @@ _SENSITIVE_RE = re.compile(r'SGWCMAID[A-Za-z0-9]+|wq\.wahlap\.net/qrcode/', re.I
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_RESPONSE_BYTES = 12 * 1024 * 1024
 _QQ_IMAGE_HOSTS = {'gchat.qpic.cn', 'c2cpicdw.qpic.cn', 'multimedia.nt.qq.com.cn'}
-JOB_LABELS = {'b50': '生成 B50', 'refresh': '无二维码更新', 'upload': '二维码传分', 'bind': '绑定舞萌账号'}
+JOB_LABELS = {
+    'b50': '生成 B50', 'refresh': '无二维码更新', 'upload': '二维码传分',
+    'bind': '绑定舞萌账号', 'report': '生成成绩报表',
+    'tag': '生成底力分析', 'prescription': '生成弱项处方', 'risk': '生成 B50 风险预警',
+    'gold': '生成含金量', 'water': '生成含水量', 'howweak': '生成我有多菜',
+}
+REPORT_COMMANDS = {'report_daily': 'daily', 'report_weekly': 'weekly', 'report_monthly': 'monthly', 'report_yearly': 'yearly'}
+IMAGE_COMMANDS = {'tag', 'prescription', 'risk', 'gold', 'water', 'howweak'}
 CHANNEL_LABELS = {'awmcnet': 'AWMCNET', 'fish': '水鱼', 'lxns': '落雪'}
 CHANNEL_STATES = {'pending': '同步中', 'synced': '已同步', 'failed': '同步失败', 'skipped': '已跳过'}
 COMMANDS = {
@@ -35,6 +42,12 @@ COMMANDS = {
     'u': 'refresh', '导': 'refresh', '更': 'refresh', '更新': 'refresh', 'mai对手同步': 'refresh',
     'maiu': 'upload', '上传水鱼': 'upload', 'mai上传b50': 'upload',
     'mai帮助': 'help', 'awmc帮助': 'help', 'mai账号': 'account',
+    '签到': 'checkin', 'awmc签到': 'checkin',
+    '我的awmc': 'summary', '我的账号': 'summary', 'awmc状态': 'summary', '余额': 'summary',
+    '日报': 'report_daily', '周报': 'report_weekly', '月报': 'report_monthly', '年报': 'report_yearly',
+    '开启存储数据': 'storage', '存储数据': 'storage', '立即存储数据': 'storage',
+    '底力分析': 'tag', '弱项处方': 'prescription', 'b50风险预警': 'risk', '风险预警': 'risk',
+    '含金量': 'gold', '含水量': 'water', '我有多菜': 'howweak',
     'mai绑定': 'bind', 'maibind': 'bind', '绑定舞萌': 'bind',
     '查进度': 'progress', '查任务': 'progress', 'mai查任务': 'progress',
 }
@@ -172,6 +185,33 @@ def decode_bridge_image(value: object) -> bytes:
     except ValueError:
         pass
     raise BridgeError('response', 'AWMC 返回的 B50 图片无效。')
+
+
+def format_summary(result: dict) -> str:
+    if not result.get('ok'):
+        return str(result.get('message') or '暂时无法读取 AWMC 状态。')
+    state = result.get('checkin') if isinstance(result.get('checkin'), dict) else {}
+    if state.get('available'):
+        checkin = '今日可签到'
+    elif state.get('checked_today'):
+        checkin = '今日已签到'
+    elif state.get('cooldown_remaining_seconds'):
+        checkin = f"冷却中（约 {max(1, int(state['cooldown_remaining_seconds']) // 60)} 分钟）"
+    else:
+        checkin = '不可签到'
+    today = result.get('today') if isinstance(result.get('today'), dict) else {}
+    effects = result.get('effects') if isinstance(result.get('effects'), dict) else {}
+    lines = [
+        f"BREAK：{int(result.get('balance') or 0)}",
+        f"连签：{int(result.get('streak') or 0)} 天",
+        f"签到：{checkin}",
+    ]
+    if today:
+        lines.append(f"今日：消耗 {int(today.get('break_spent') or 0)} / 获得 {int(today.get('break_gained') or 0)}")
+    double = effects.get('double_break')
+    if isinstance(double, dict) and double.get('active'):
+        lines.append('双倍 BREAK 生效中')
+    return '我的 AWMC\n' + '\n'.join(lines)
 
 
 def format_progress(result: dict) -> str:
