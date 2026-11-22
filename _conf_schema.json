@@ -469,6 +469,19 @@
     "default": false,
     "hint": "关闭后 /dx玩家 不再发起任何证书请求；重签证书后再打开"
   },
+  "awmc_bridge_url": {
+    "description": "AWMC Bridge HTTPS 地址",
+    "type": "string",
+    "default": "",
+    "hint": "填 AWMC 群后台的 HTTPS 地址，例如 https://group.wmc.pub；与密钥都留空则使用原水鱼 B50"
+  },
+  "awmc_bridge_secret": {
+    "description": "KanadeBot 专用 AWMC Bridge 密钥",
+    "type": "string",
+    "default": "",
+    "secret": true,
+    "hint": "与 AWMC Bot 的 AWMC_KANADE_BRIDGE_SECRET 一致，至少 32 字符"
+  },
   "b50_enable": {
     "description": "/b50 查分（Best50 图片）总开关",
     "type": "bool",

@@ -19,11 +19,11 @@
 - 图片：**本机渲染**——Jinja2 生成 HTML，Playwright 驱动本机浏览器内核截图
   （Windows 直接使用系统自带的 Edge），风格为**宵崎奏主题 + 萌感字体（站酷快乐体）**；
 - 谱面与资料数据：水鱼查分器曲库（本地缓存 24 小时）+ 各 WIKI / 官网正文由本机抓取并解析；
-- B50 渲染、封面缓存、成绩图片全部在本机生成并缓存在 AstrBot 的插件数据目录；
+- 可选接入 AWMC Bridge，直接使用发送者的 QQ 查分、同步成绩和开通 AWMC 档案；
 - 机台查询（`/dx玩家`）使用本机保存的 maidx 证书（`.p12`）直连，证书只在本地解密；
 - 电脑控制（shell / Python / OpenCode）同样是本机执行，只有授权操作员能触发。
 
-换句话说：**装好本机就能全功能跑完，不需要服务器、不需要 Docker、不需要任何外部渲染站。**
+会馆功能可在 Windows 本机运行。启用 AWMC 成绩功能时，共用 AWMC Bot 已有的服务端。
 
 运行环境一览：
 
@@ -45,7 +45,10 @@
 | `离店` | `@机器人 离店`：按 QQ 绑定自动离店结算（也支持 `/离店`）；**不支持机器人进店**（进店请在网站操作） | 每人 30 秒冷却 |
 | `包场/包机` | `@机器人 包场 舞萌 10日14时~16时`：登记包场（群主/管理员）；包场时段群内 `/j` 只提示包场 | —— |
 | `取消包场` | `@机器人 取消包场 [机台关键词]`：撤销包场登记（不带关键词=全部） | —— |
-| `b50`（默认 `/b50`） | 本机渲染 Best50 成绩图（水鱼查分器数据 + 本地封面缓存）；可带昵称 / QQ / @ / 引用查别人 | 每人 15 秒冷却；渲染排队 |
+| `/b50`、`/B50` | 接入 AWMC Bridge 时查询本人 B50，沿用 AWMC 数据源和出图；未配置时使用本机水鱼 B50 | 每人默认 15 秒冷却 |
+| `/qbind`、`/mai状态` | 用发送者 QQ 查看 AWMC 开通状态；首次默认同意统一用户协议并直接开通 | 需 AWMC Bridge |
+| `u`、`/u` | 从已绑定的舞萌档案免码更新成绩 | 沿用 AWMC 冷却和配额 |
+| `/mai绑定`、`/maiu`、`/查进度` | 首次绑定舞萌、使用二维码完整传分、查看各平台同步状态 | 同一 QQ 同时一个任务 |
 | `dx玩家`（默认 `/dx玩家`） | 用本机 maidx 证书查询机台在线人数（仅操作员私聊与指定群） | —— |
 | `/bz QQ号 点数` | 为指定客户增点并显示余额（`bz_admins` 与群主可用） | —— |
 | `/memory`、`/players` | 查看长期记忆 / 玩家档案；`/memory now` 立即汇总 | 管理员 |
@@ -176,13 +179,17 @@ Content-Type: application/json
 - `/mj`：发送 bot 账号收藏的表情包（自动读取 NapCat 收藏、下载到本地缓存，链接过期也不影响）；
 - `/mjlist`：列出收藏表情与编号，用配置 `mj_sticker_index` 选择发送第几个。
 
-## B50 查分（/b50）
+## AWMC 查分与成绩同步
 
-- 数据取自水鱼查分器 API，封面第一次用到时下载到本机 `b50_covers` 并长期复用；
-- 成绩图同样由本机 Playwright 渲染，同一份成绩在缓存时间内直接复用图片；
-- 默认 15 秒冷却、每人一次渲染排队（`b50_render_interval_seconds`），避免把本机渲染打满；
-- `b50_allow_others` 可放开查别人的成绩（@ / 引用 / 昵称 / QQ 号），`b50_qq_min_length` 控制位数判定；
-- 关掉 `b50_enable_image` 就只回文字摘要。
+在 AWMC Bot 的群后台启用 Kanade Bridge 配置 `AWMC_KANADE_BRIDGE_SECRET`，并在 AstrBot 填入 `awmc_bridge_url`（群后台 HTTPS 地址）和同一把 `awmc_bridge_secret`。KanadeBot 通过现有论坛 Bridge 的签名和任务机制使用 AWMC Bot 的 B50、`u` 和 `maiu`。机台接口沿用服务端 `AWMC_API_MODE=team`。部署步骤见 AWMC Bot 仓库的 `docs/XF论坛桥接.md`。
+
+- `/qbind` 或 `/mai状态` 查看状态。首次使用按默认同意记录 AWMC maiBot 统一用户协议并直接按当前 QQ 开通；发送 `/用户协议` 可查看文案。可通过 `/撤回用户协议` 撤回，或发送 `/不同意共享我的数据` 关闭脱敏共享。
+- `/b50` 查询本人。出图、数据源偏好、BREAK 计费按 AWMC 规则执行。关闭 `b50_enable_image` 可查询文字摘要。
+- `u` 或 `/u` 使用已绑定的舞萌档案免码更新 AWMCNET，以及已授权的水鱼、落雪。快速更新不包含 FC、AP、同步徽章和游玩次数。
+- `/maiu` 使用最新舞萌二维码完整同步 AWMCNET 和已授权的水鱼。接受 SGWCMAID、官方二维码链接，或 QQ 原生图片。可在命令后附二维码，也可在同一会话按提示续发。未绑定舞萌账号时，首张码用于建档；之后可发 `/u` 或用一张新码发 `/maiu`。`/mai绑定` 可单独建档。二维码建议私聊提交，需允许该 QQ 的私聊。
+- `/查进度` 或 `/查任务` 查看进度。已入队的上传渠道会显示同步状态。水鱼和落雪授权沿用 AWMC Bot 的 `dfbind` 和 `lxbind`。
+
+会馆的 `/bd 验证码` 继续用于绑定离店账号。`awmc_bridge_url` 和 `awmc_bridge_secret` 都留空时，`/b50` 使用原有的水鱼接口和本机 Playwright 渲染，保留本机封面缓存及 `b50_allow_others` 查他人配置。
 
 ## 机台查询（/dx玩家）
 
@@ -228,7 +235,8 @@ astrbot_plugin_dcs_whosin/
 ├── dcs_booking.py            包场（包机）登记与持久化
 ├── dcs_sitebooking.py        站点包机页读取（图片内嵌预告）
 ├── dcs_maidx.py              /dx玩家 机台在线查询（本机证书）
-├── dcs_b50.py                /b50 查分（水鱼接口 + 本地封面缓存）
+├── dcs_awmc.py               AWMC Bridge 客户端与舞萌二维码解析
+├── dcs_b50.py                本机 /b50 查分（水鱼接口 + 本地封面缓存）
 ├── dcs_websearch.py          联网搜索与网页取文（多引擎回退）
 ├── dcs_vchart.py             v.wmc.pub 谱面只读客户端（社区评分/标签/评论）
 ├── dcs_render.py             本机图片渲染与缓存（Jinja2 + Playwright，独立线程）
@@ -352,7 +360,9 @@ astrbot_plugin_dcs_whosin/
 | `maidx_cert` | string | 空 | maidx 机台管理证书文件（.p12）的绝对路径 |
 | `maidx_cert_password` | string | 空 | maidx 证书的安装密码（下载页上给的那个） |
 | `dx_enable` | bool | `false` | /dx玩家 机台信息查询总开关 |
-| `b50_enable` | bool | `true` | /b50 查分（Best50 图片）总开关 |
+| `awmc_bridge_url` | string | 空 | AWMC 群后台 HTTPS 地址 |
+| `awmc_bridge_secret` | string（密文） | 空 | Kanade 专用桥接密钥，与 AWMC 端一致 |
+| `b50_enable` | bool | `true` | /b50 查分总开关 |
 | `b50_enable_image` | bool | `true` | /b50 是否出图片 |
 | `b50_render_interval_seconds` | int | `15` | /b50 图片渲染最小间隔（秒/人，排队） |
 | `b50_cooldown_seconds` | int | `15` | /b50 同一用户冷却（秒） |

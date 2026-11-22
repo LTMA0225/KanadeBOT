@@ -27,6 +27,7 @@ from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.message.message_event_result import MessageChain
 
 try:
+    from . import dcs_awmc
     from .dcs_attend import (
         call_force_leave,
         fetch_latest_charge_fen,
@@ -71,7 +72,6 @@ try:
         format_current_rate_message,
         format_fee_yuan,
         parse_pricing,
-        visit_key,
     )
     from .dcs_render import WhosinRenderer
     from .dcs_sitebooking import fetch_booking_html, parse_booking_page, pick_display
@@ -84,6 +84,7 @@ except ImportError:
     _plugin_dir = str(Path(__file__).resolve().parent)
     if _plugin_dir not in sys.path:
         sys.path.insert(0, _plugin_dir)
+    import dcs_awmc
     from dcs_attend import (
         call_force_leave,
         fetch_latest_charge_fen,
@@ -122,7 +123,6 @@ except ImportError:
         format_current_rate_message,
         format_fee_yuan,
         parse_pricing,
-        visit_key,
     )
     from dcs_render import WhosinRenderer
     from dcs_sitebooking import fetch_booking_html, parse_booking_page, pick_display
@@ -240,6 +240,13 @@ class DcsWhosinPlugin(Star):
         self._b50_next_at = 0.0
         cover_dir = self.plugin_data_dir / "b50_covers"
         self._b50_covers = _CoverLoader(str(cover_dir))
+        self._awmc = dcs_awmc.AwmcBridge(
+            str(config.get('awmc_bridge_url') or ''), str(config.get('awmc_bridge_secret') or ''),
+        )
+        self._awmc_pending: dict[tuple[str, str], tuple[str, float]] = {}
+        self._awmc_active: set[str] = set()
+        self._awmc_scan_gate = asyncio.Semaphore(1)
+        self._awmc_qr_notices: dict[str, float] = {}
 
     @staticmethod
     def _resolve_cache_dir() -> Path:
@@ -289,9 +296,12 @@ class DcsWhosinPlugin(Star):
         logger.info("[dcs_whosin] 状态推送任务已启动。")
 
     async def _ensure_render_dependencies(self) -> None:
-        if not self.config.get("enable_image", True):
-            return
-        missing = [name for name in ("jinja2", "playwright") if importlib.util.find_spec(name) is None]
+        dependencies = []
+        if self.config.get('enable_image', True):
+            dependencies.extend(('jinja2', 'playwright'))
+        if self._awmc.enabled:
+            dependencies.extend(('PIL', 'zxingcpp'))
+        missing = [name for name in dependencies if importlib.util.find_spec(name) is None]
         if not missing:
             return
         try:
@@ -635,7 +645,7 @@ class DcsWhosinPlugin(Star):
             format_bind_reply(result if isinstance(result, dict) else {"ok": False, "error": "network"}, qq)
         )
 
-    @filter.command("b50")
+    @filter.command("b50", alias={"B50"})
     async def best50(self, event: AstrMessageEvent):
         if not self._policy_allows(event):
             return
@@ -647,8 +657,8 @@ class DcsWhosinPlugin(Star):
         cooldown = int(self.config.get("b50_cooldown_seconds", 15) or 0)
         now = time.monotonic()
         if cooldown > 0:
-            last = self._b50_last_by_user.get(sender, 0.0)
-            if now - last < cooldown:
+            last = self._b50_last_by_user.get(sender)
+            if last is not None and now - last < cooldown:
                 remain = int(cooldown - (now - last)) + 1
                 yield event.plain_result(f"b50 每人 {cooldown} 秒一次哦，等 {remain} 秒再来吧。")
                 return
@@ -663,6 +673,19 @@ class DcsWhosinPlugin(Star):
         target_name = ""
         arg = self._b50_arg(event.get_message_str())
         quoted = self._b50_quote_target(event)
+        if self._awmc.enabled:
+            event.should_call_llm(True)
+            try:
+                if arg or quoted:
+                    await event.send(event.plain_result('AWMC /b50 查询当前 QQ 的成绩，请直接发送 /b50。'))
+                elif not (qq := self._awmc_sender(event)):
+                    await event.send(event.plain_result('请从 QQ 使用 AWMC /b50。'))
+                else:
+                    await self._awmc_job(event, qq, 'b50', text_only=not self.config.get('b50_enable_image', True))
+            except dcs_awmc.BridgeError as exc:
+                await event.send(event.plain_result(str(exc)))
+            event.stop_event()
+            return
         if quoted and (not arg or self._b50_has_at(event)):
             # @ 了人或引用了消息，就查那个人的
             target_qq = quoted
@@ -722,7 +745,7 @@ class DcsWhosinPlugin(Star):
 
     def _b50_quote_target(self, event: AstrMessageEvent) -> str:
         """被 @ 或被引用的人的 QQ（排除自己）。"""
-        self_id = str(getattr(self, "_bot_self_id", "") or "")
+        self_id = str(event.get_self_id() or self._bot_self_id)
         ids: list[str] = []
         try:
             for comp in event.get_messages():
@@ -775,6 +798,201 @@ class DcsWhosinPlugin(Star):
                 )
             finally:
                 self._b50_next_at = time.monotonic() + max(interval, 0)
+
+    @staticmethod
+    def _awmc_sender(event: AstrMessageEvent) -> str:
+        if event.get_platform_name() != 'aiocqhttp':
+            return ''
+        qq = str(event.get_sender_id() or '')
+        if qq != str(event.get_self_id()) and dcs_awmc.QQ_RE.fullmatch(qq):
+            return qq
+        return ''
+
+    def _awmc_recall_hint(self, event: AstrMessageEvent) -> str:
+        if event.is_private_chat():
+            return ''
+        room = str(event.unified_msg_origin)
+        now = time.monotonic()
+        last = self._awmc_qr_notices.get(room)
+        if last is not None and now - last < 60:
+            return ''
+        self._awmc_qr_notices = {key: at for key, at in self._awmc_qr_notices.items() if at + 60 > now}
+        self._awmc_qr_notices[room] = now
+        return '请自行撤回含二维码的消息。'
+
+    async def _awmc_job(self, event: AstrMessageEvent, qq: str, kind: str, **payload):
+        if qq in self._awmc_active:
+            await event.send(event.plain_result('你已有一个 AWMC 任务正在处理，可用 /查进度 查看。'))
+            return
+        self._awmc_active.add(qq)
+        try:
+            try:
+                response = await self._awmc.request('POST', qq, '/jobs', {
+                    'kind': kind, 'request_id': dcs_awmc.request_id(event, kind), **payload,
+                })
+            except dcs_awmc.BridgeError as exc:
+                if exc.code == 'network':
+                    raise dcs_awmc.BridgeError('unknown_submit', '提交结果暂未确认，请先用 /查进度 查看。') from None
+                raise
+            job = response.get('job')
+            if not isinstance(job, dict):
+                raise dcs_awmc.BridgeError('response', 'AWMC 返回的任务状态暂不可用。')
+            if job.get('busy'):
+                await event.send(event.plain_result('你已有一个 AWMC 任务正在处理，可用 /查进度 查看。'))
+                return
+            if job.get('status') == 'running':
+                await event.send(event.plain_result(f'⏳ AWMC 已受理，正在{dcs_awmc.JOB_LABELS[kind]}…'))
+                try:
+                    job = await self._awmc.wait_job(qq, job)
+                except dcs_awmc.BridgeError as exc:
+                    if exc.code in ('network', 'unknown_job'):
+                        raise dcs_awmc.BridgeError('unknown_job', '暂时无法确认任务结果。请先用 /查进度 查看。') from None
+                    raise
+            if job.get('status') == 'running':
+                await event.send(event.plain_result('AWMC 仍在处理，可用 /查进度 查看结果。'))
+                return
+            text = dcs_awmc.safe_message(str(job.get('message') or 'AWMC 未返回任务结果。'))[:1500]
+            if not job.get('image_ready') or job.get('status') != 'done':
+                await event.send(event.plain_result(text))
+                return
+            try:
+                result = await self._awmc.request('GET', qq, f"/jobs/{job['id']}/image")
+                image = dcs_awmc.decode_bridge_image(result.get('image'))
+            except (dcs_awmc.BridgeError, KeyError):
+                await event.send(event.plain_result(text + '\n暂时无法取回这次图片。'))
+                return
+            await event.send(event.chain_result([Plain(text), Image.fromBytes(image)]))
+        finally:
+            self._awmc_active.discard(qq)
+
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def awmc_commands(self, event: AstrMessageEvent):
+        text = str(event.get_message_str() or '').strip()
+        action, arg = dcs_awmc.command_parts(text)
+        sensitive = dcs_awmc.contains_qr(text)
+        if not self._awmc.enabled:
+            return
+        qq = self._awmc_sender(event)
+        key = (str(event.unified_msg_origin), qq)
+        now = time.monotonic()
+        pending = self._awmc_pending.get(key)
+        if pending and pending[1] <= now:
+            self._awmc_pending.pop(key, None)
+            pending = None
+        image = None
+        if action in ('bind', 'upload') or pending:
+            image = next((item for item in event.get_messages() if isinstance(item, Image)), None)
+        if not action and pending and ((sensitive and not image) or image is not None or text in ('取消', '/取消')):
+            action, arg = pending[0], text
+        if not action and not sensitive:
+            return
+        if sensitive and not event.is_at_or_wake_command and not pending and not image and action not in ('bind', 'upload'):
+            return
+        if sensitive or image is not None or action in ('accept', 'bind', 'upload'):
+            # Keep account credentials away from the default LLM and group memory.
+            event.should_call_llm(True)
+        if not self._policy_allows(event):
+            if sensitive or image is not None:
+                event.stop_event()
+            return
+        if not qq or not self._awmc.enabled:
+            if sensitive or image is not None:
+                event.stop_event()
+            return
+        if not event.is_at_or_wake_command and action not in ('refresh', 'bind', 'upload') and not sensitive:
+            return
+        if action == 'refresh' and arg:
+            return
+        if action == 'refresh' and not event.is_at_or_wake_command and self._aquiz_pending:
+            if str(event.get_group_id() or '') == self._aquiz_target_group():
+                return
+        if sensitive and action not in ('bind', 'upload'):
+            note = self._awmc_recall_hint(event)
+            await event.send(event.plain_result('请用 /maiu 或 /mai绑定 提交舞萌二维码。' + note))
+            event.stop_event()
+            return
+        try:
+            if action in ('bind', 'upload'):
+                await self._awmc_submit_qr(event, key, action, arg, image)
+            elif action == 'refresh':
+                await self._awmc_job(event, qq, 'refresh')
+            else:
+                reply = await self._awmc_account_command(qq, action, arg)
+                if reply:
+                    await event.send(event.plain_result(reply))
+        except dcs_awmc.BridgeError as exc:
+            await event.send(event.plain_result(str(exc)))
+        event.stop_event()
+
+    async def _awmc_submit_qr(self, event, key, kind: str, raw: str, image):
+        _, qq = key
+        if raw in ('取消', '/取消'):
+            self._awmc_pending.pop(key, None)
+            await event.send(event.plain_result('已取消这次二维码提交。'))
+            return
+        if dcs_awmc.contains_qr(raw) or image is not None:
+            if note := self._awmc_recall_hint(event):
+                await event.send(event.plain_result(note))
+        account = await self._awmc.request('GET', qq, '/account')
+        agreement = dcs_awmc.agreement_from(account)
+        if not agreement['accepted']:
+            self._awmc_pending.pop(key, None)
+            await event.send(event.plain_result(agreement['message']))
+            return
+        if kind == 'bind' and account.get('arcade_bound'):
+            self._awmc_pending.pop(key, None)
+            await event.send(event.plain_result('当前 QQ 已绑定舞萌账号，可直接用 /u 或 /maiu。'))
+            return
+        if qq in self._awmc_active:
+            await event.send(event.plain_result('你已有一个 AWMC 任务正在处理，可用 /查进度 查看。'))
+            return
+        qr = dcs_awmc.extract_qr(raw)
+        if not qr and image is not None:
+            qr = await dcs_awmc.qr_from_image(image, self._awmc_scan_gate)
+        if not qr:
+            now = time.monotonic()
+            self._awmc_pending = {k: v for k, v in self._awmc_pending.items() if v[1] > now}
+            self._awmc_pending[key] = (kind, now + 180)
+            text = '请在 3 分钟内发送最新的 SGWCMAID、舞萌官方二维码链接或二维码图片。发送「取消」退出。'
+            if raw or image is not None:
+                text = '未识别到有效的舞萌二维码。\n' + text
+            if not event.is_private_chat():
+                text += '\n也可私聊重新发起 /maiu 或 /mai绑定。'
+            await event.send(event.plain_result(text))
+            return
+        self._awmc_pending.pop(key, None)
+        await self._awmc_job(event, qq, kind, qrcode=qr)
+
+    async def _awmc_account_command(self, qq: str, action: str, arg: str) -> str:
+        if action == 'help':
+            return (
+                'AWMC 指令：\n'
+                '/b50 查本人 B50｜/u 免码更新｜/maiu [二维码] 完整同步\n'
+                '/mai绑定 [二维码] 首次绑定｜/qbind 查看开通状态｜/查进度 同步进度\n'
+                '/用户协议 查看统一协议｜/撤回用户协议｜/不同意共享我的数据'
+            )
+        if action == 'progress':
+            return dcs_awmc.format_progress(await self._awmc.request('GET', qq, '/progress'))
+        if action == 'revoke':
+            result = await self._awmc.request('POST', qq, '/agreement', {'action': 'revoke'})
+            return str(result['message'])
+        if action.startswith('sharing_'):
+            result = await self._awmc.request('POST', qq, '/sharing', {'action': action.removeprefix('sharing_')})
+            return str(result['message'])
+        if action == 'account' and arg and arg != qq:
+            return 'KanadeBot 按发消息的 QQ 开通 AWMC。直接发 /qbind 即可。'
+        account = await self._awmc.request('GET', qq, '/account')
+        agreement = dcs_awmc.agreement_from(account)
+        if action == 'accept' and arg:
+            result = await self._awmc.request('POST', qq, '/agreement', {
+                'action': 'accept', 'version': agreement['version'], 'phrase': arg,
+            })
+            return str(result['message'])
+        if action in ('accept', 'terms') or not agreement['accepted']:
+            return agreement['message']
+        if account.get('arcade_bound'):
+            return '当前 QQ 已开通 AWMC，已绑定舞萌账号。可用 /b50、/u 或 /maiu。'
+        return '当前 QQ 已开通 AWMC。可用 /b50 查已有成绩，或发 /mai绑定 录入舞萌账号。'
 
     @filter.regex(r"^包(?:机|场)\s*\S")
     async def booking_add(self, event: AstrMessageEvent):
@@ -889,6 +1107,10 @@ class DcsWhosinPlugin(Star):
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL)
     async def record_group_message(self, event: AstrMessageEvent):
+        text = str(event.get_message_str() or '').strip()
+        if dcs_awmc.contains_qr(text) or dcs_awmc.command_parts(text)[0] in ('accept', 'bind', 'upload'):
+            event.should_call_llm(True)
+            return
         try:
             self._bot_self_id = str(event.get_self_id() or self._bot_self_id)
         except Exception:
@@ -919,7 +1141,6 @@ class DcsWhosinPlugin(Star):
                 return
         except Exception:
             return
-        text = str(event.get_message_str() or "").strip()
         if not text:
             if not any(isinstance(c, Image) for c in event.get_messages()):
                 return
@@ -3564,5 +3785,6 @@ class DcsWhosinPlugin(Star):
         for task in (self._status_task, self._deps_task, self._presence_task, self._mj_task, self._ltm_task, self._aquiz_task, self._aquiz_history_task, self._image_cleanup_task):
             if task and not task.done():
                 task.cancel()
+        await self._awmc.close()
         await self.renderer.close()
         logger.info("[dcs_whosin] 插件已停用，本地浏览器与图片缓存已清理。")
