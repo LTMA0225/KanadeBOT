@@ -187,7 +187,7 @@ Content-Type: application/json
 
 在 AWMC Bot 的群后台启用 Kanade Bridge 配置 `AWMC_KANADE_BRIDGE_SECRET`，并在 AstrBot 填入 `awmc_bridge_url`（群后台 HTTPS 地址）和同一把 `awmc_bridge_secret`。KanadeBot 通过现有论坛 Bridge 的签名和任务机制使用 AWMC Bot 的 B50、`u` 和 `maiu`。机台接口沿用服务端 `AWMC_API_MODE=team`。部署步骤见 AWMC Bot 仓库的 `docs/XF论坛桥接.md`。
 
-- `/qbind` 或 `/mai状态` 查看状态。首次使用按默认同意记录 AWMC maiBot 统一用户协议、按当前 QQ 开通，并用 `QQ@qq.com` 自动查找/创建 BBS 账号（用户名优先取 QQ 昵称，取不到用 `maimai_<QQ>`）；不需要邮箱验证码。BBS 自动建号依赖 AWMC 的 `AWMC_XF_API_KEY`。发送 `/用户协议` 可查看文案。可通过 `/撤回用户协议` 撤回，或发送 `/不同意共享我的数据` 关闭脱敏共享。
+- `/qbind` 或 `/mai状态` 查看状态。首次使用会展示 AWMC 统一用户协议、按默认同意记录、按当前 QQ 开通，并用 `QQ@qq.com` 自动查找/创建 BBS 账号；现有无论坛绑定的用户在下一次使用任一 AWMC 功能时自动补建（用户名优先取 QQ 昵称，取不到用 `maimai_<QQ>`）；不需要邮箱验证码。BBS 自动建号依赖 AWMC 的 `AWMC_XF_API_KEY`。发送 `/用户协议` 可查看文案。可通过 `/撤回用户协议` 撤回，或发送 `/不同意共享我的数据` 关闭脱敏共享。
 - `/b50` 查询本人。出图、数据源偏好、BREAK 计费按 AWMC 规则执行。关闭 `b50_enable_image` 可查询文字摘要。
 - `u` 或 `/u` 使用已绑定的舞萌档案免码更新 AWMCNET，以及已授权的水鱼、落雪。快速更新不包含 FC、AP、同步徽章和游玩次数。
 - `/maiu` 使用最新舞萌二维码完整同步 AWMCNET 和已授权的水鱼。接受 SGWCMAID、官方二维码链接，或 QQ 原生图片。可在命令后附二维码，也可在同一会话按提示续发。未绑定舞萌账号时，首张码用于建档；之后可发 `/u` 或用一张新码发 `/maiu`。`/mai绑定` 可单独建档。二维码建议私聊提交，需允许该 QQ 的私聊。

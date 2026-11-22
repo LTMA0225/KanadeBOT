@@ -841,6 +841,8 @@ class DcsWhosinPlugin(Star):
                 if exc.code == 'network':
                     raise dcs_awmc.BridgeError('unknown_submit', '提交结果暂未确认，请先用 /查进度 查看。') from None
                 raise
+            if notice := response.get('notice'):
+                await event.send(event.plain_result(str(notice)))
             job = response.get('job')
             if not isinstance(job, dict):
                 raise dcs_awmc.BridgeError('response', 'AWMC 返回的任务状态暂不可用。')
@@ -946,6 +948,8 @@ class DcsWhosinPlugin(Star):
                 await event.send(event.plain_result(note))
         account = await self._awmc.request('GET', qq, '/account', self._awmc_identity(event, qq))
         agreement = dcs_awmc.agreement_from(account)
+        if account.get('forum_created'):
+            await event.send(event.plain_result(agreement['message']))
         if not agreement['accepted']:
             self._awmc_pending.pop(key, None)
             await event.send(event.plain_result(agreement['message']))
@@ -988,13 +992,24 @@ class DcsWhosinPlugin(Star):
             group = str(event.get_group_id() or '')
             result = await self._awmc.request('POST', qq, '/checkin', {
                 'group_id': int(group) if group.isdigit() else None,
+                **self._awmc_identity(event, qq),
             })
-            return str(result.get('message') or '签到完成。')
+            text = str(result.get('message') or '签到完成。')
+            if result.get('notice'):
+                text = str(result['notice']) + '\n\n' + text
+            return text
         if action == 'summary':
-            return dcs_awmc.format_summary(await self._awmc.request('GET', qq, '/summary'))
+            result = await self._awmc.request('GET', qq, '/summary', self._awmc_identity(event, qq))
+            text = dcs_awmc.format_summary(result)
+            if result.get('notice'):
+                text = str(result['notice']) + '\n\n' + text
+            return text
         if action == 'storage':
-            result = await self._awmc.request('POST', qq, '/storage')
-            return str(result.get('message') or '已开启数据存储。')
+            result = await self._awmc.request('POST', qq, '/storage', self._awmc_identity(event, qq))
+            text = str(result.get('message') or '已开启数据存储。')
+            if result.get('notice'):
+                text = str(result['notice']) + '\n\n' + text
+            return text
         if action == 'progress':
             return dcs_awmc.format_progress(await self._awmc.request('GET', qq, '/progress'))
         if action == 'revoke':
@@ -1014,6 +1029,10 @@ class DcsWhosinPlugin(Star):
             return str(result['message'])
         if action in ('accept', 'terms') or not agreement['accepted']:
             return agreement['message']
+        if account.get('forum_created'):
+            return agreement['message'] + '\n\n' + (
+                f"BBS：{account.get('forum_username')}（已自动创建）"
+            )
         forum = (f"BBS：{account.get('forum_username')}" if account.get('forum_linked') else 'BBS：尚未创建')
         if account.get('arcade_bound'):
             return forum + '\n已绑定舞萌账号，可用 /b50、/u 或 /maiu。'
