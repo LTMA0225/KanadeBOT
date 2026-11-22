@@ -362,6 +362,7 @@ astrbot_plugin_dcs_whosin/
 | `dx_enable` | bool | `false` | /dx玩家 机台信息查询总开关 |
 | `awmc_bridge_url` | string | 空 | AWMC 群后台 HTTPS 地址 |
 | `awmc_bridge_secret` | string（密文） | 空 | Kanade 专用桥接密钥，与 AWMC 端一致 |
+| `awmc_bridge_allow_insecure_http` | bool | `false` | 允许公网 HTTP Bridge；二维码会明文传输，仅临时排查 |
 | `b50_enable` | bool | `true` | /b50 查分总开关 |
 | `b50_enable_image` | bool | `true` | /b50 是否出图片 |
 | `b50_render_interval_seconds` | int | `15` | /b50 图片渲染最小间隔（秒/人，排队） |

@@ -191,9 +191,10 @@ def format_progress(result: dict) -> str:
 
 
 class AwmcBridge:
-    def __init__(self, url: str, secret: str):
+    def __init__(self, url: str, secret: str, *, allow_insecure_http: bool = False):
         self.url = url.strip().rstrip('/')
         self._secret = secret.strip()
+        self._allow_insecure_http = bool(allow_insecure_http)
         self._session = None
 
     @property
@@ -203,14 +204,19 @@ class AwmcBridge:
     def _origin(self) -> str:
         try:
             url = urlsplit(self.url)
-            if (url.scheme == 'https' and url.hostname and not url.username and not url.password
+            loopback = (url.hostname or '').lower() in {'127.0.0.1', 'localhost', '::1'}
+            secure = url.scheme == 'https'
+            # HTTP is explicit opt-in for an SSH tunnel or a trusted direct
+            # origin. Prefer HTTPS: a score QR is a live account credential.
+            insecure = url.scheme == 'http' and (loopback or self._allow_insecure_http)
+            if ((secure or insecure) and url.hostname and not url.username and not url.password
                     and not url.query and not url.fragment and url.port != 0
                     and url.path in ('', BRIDGE_PATH, BRIDGE_PATH.removesuffix('/kanade'))
                     and len(self._secret) >= 32):
-                return f'https://{url.netloc}'
+                return f'{url.scheme}://{url.netloc}'
         except ValueError:
             pass
-        raise BridgeError('configuration', 'AWMC Bridge 尚未配置，请联系 KanadeBot 管理员。')
+        raise BridgeError('configuration', 'AWMC Bridge 需要 HTTPS；本机 SSH 隧道可用 127.0.0.1 的 HTTP。')
 
     async def request(self, method: str, qq: str, endpoint: str, payload: dict | None = None) -> dict:
         import aiohttp
